@@ -160,6 +160,11 @@ pub enum PublisherCreateError {
     /// Caused by a failure when instantiating a [`ArcSyncPolicy`] defined in the
     /// [`Service`](crate::service::Service) as `ArcThreadSafetyPolicy`.
     FailedToDeployThreadsafetyPolicy,
+    /// The [`Service`](crate::service::Service) was created with
+    /// [`PublisherMode::ForwarderOnly`](crate::port::publisher_mode::PublisherMode::ForwarderOnly),
+    /// which rejects native publishers. Only forwarding participations from
+    /// other services are permitted.
+    NativePublisherRejectedByForwarderOnlyService,
 }
 
 impl core::fmt::Display for PublisherCreateError {
@@ -398,6 +403,15 @@ impl<
             .service
             .static_config()
             .publish_subscribe();
+
+        if static_config.publisher_mode == crate::port::publisher_mode::PublisherMode::ForwarderOnly
+        {
+            fail!(from origin,
+                with PublisherCreateError::NativePublisherRejectedByForwarderOnlyService,
+                "{} since the service was created with PublisherMode::ForwarderOnly, which forbids native publishers.",
+                msg);
+        }
+
         let service = &publisher_factory.factory.service;
         let subscriber_list = &service
             .dynamic_storage()

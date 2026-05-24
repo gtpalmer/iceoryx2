@@ -25,10 +25,15 @@ use iceoryx2_cal::serialize::Serialize;
 use iceoryx2_cal::static_storage::StaticStorageLocked;
 use iceoryx2_log::{fail, fatal_panic, warn};
 
+use crate::port::publisher_mode::PublisherMode;
 use crate::service::dynamic_config::publish_subscribe::DynamicConfigSettings;
 use crate::service::header::publish_subscribe::Header;
 use crate::service::port_factory::publish_subscribe;
+use crate::service::service_name::ServiceName;
 use crate::service::static_config::messaging_pattern::MessagingPattern;
+use crate::service::static_config::publish_subscribe::{
+    ForwardingTargets, ForwardingTargetsError,
+};
 use crate::service::*;
 use crate::service::{self, dynamic_config::MessagingPatternSettings};
 
@@ -80,6 +85,33 @@ pub enum PublishSubscribeOpenError {
     /// When the call creation call is repeated with a little delay the [`Service`] should be
     /// recreatable.
     IsMarkedForDestruction,
+    /// The [`Service`] has a [`PublisherMode`] that is not compatible with the
+    /// one requested by the caller.
+    IncompatiblePublisherMode,
+    /// The [`Service`] declares a different `forwards_into` set than the caller
+    /// requested.
+    IncompatibleForwardsInto,
+    /// The [`Service`] declares a different `accepts_forwarders_from` set than
+    /// the caller requested.
+    IncompatibleAcceptsForwardersFrom,
+    /// The provided list of forwarding targets exceeds
+    /// [`MAX_FORWARDING_TARGETS_PER_SERVICE`](crate::service::static_config::publish_subscribe::MAX_FORWARDING_TARGETS_PER_SERVICE).
+    ForwardingTargetsExceedsCapacity,
+    /// The provided list of forwarding targets contains a duplicate entry.
+    ForwardingTargetsContainsDuplicate,
+    /// The `forwards_into` list contains the service's own name.
+    ForwardingTargetsContainsSelf,
+    /// The `accepts_forwarders_from` list contains the service's own name.
+    AcceptsForwardersFromContainsSelf,
+    /// The requested [`PublisherMode::NativeOnly`](crate::port::publisher_mode::PublisherMode::NativeOnly)
+    /// rejects forwarder participations, but a non-empty
+    /// `accepts_forwarders_from` list was also declared. These two settings
+    /// are contradictory.
+    NativeOnlyCannotAcceptForwarders,
+    /// The requested [`PublisherMode::ForwarderOnly`](crate::port::publisher_mode::PublisherMode::ForwarderOnly)
+    /// forbids native publishers, so a non-empty `forwards_into` list could
+    /// never take effect.
+    ForwarderOnlyCannotHaveForwardsInto,
 }
 
 impl core::fmt::Display for PublishSubscribeOpenError {
@@ -132,6 +164,30 @@ pub enum PublishSubscribeCreateError {
     /// The [`Service`]s creation timeout has passed and it is still not initialized. Can be caused
     /// by a process that crashed during [`Service`] creation.
     HangsInCreation,
+    /// The provided list of forwarding targets exceeds
+    /// [`MAX_FORWARDING_TARGETS_PER_SERVICE`](crate::service::static_config::publish_subscribe::MAX_FORWARDING_TARGETS_PER_SERVICE).
+    ForwardingTargetsExceedsCapacity,
+    /// The provided list of forwarding targets contains a duplicate entry.
+    ForwardingTargetsContainsDuplicate,
+    /// The `forwards_into` list contains the service's own name, which would
+    /// produce a self-loop.
+    ForwardingTargetsContainsSelf,
+    /// The `accepts_forwarders_from` list contains the service's own name,
+    /// which would only be meaningful if the service forwarded to itself.
+    AcceptsForwardersFromContainsSelf,
+    /// The requested [`PublisherMode::NativeOnly`](crate::port::publisher_mode::PublisherMode::NativeOnly)
+    /// rejects forwarder participations, but a non-empty
+    /// `accepts_forwarders_from` list was also declared. These two settings
+    /// are contradictory — a service either accepts forwarders from declared
+    /// sources or rejects all forwarders.
+    NativeOnlyCannotAcceptForwarders,
+    /// The requested [`PublisherMode::ForwarderOnly`](crate::port::publisher_mode::PublisherMode::ForwarderOnly)
+    /// forbids native publishers, so a non-empty `forwards_into` list could
+    /// never have any runtime effect — `forwards_into` declares the outbound
+    /// routes of the service's native publishers, which do not exist under
+    /// `ForwarderOnly`. Rejecting at builder time surfaces the dead
+    /// declaration rather than silently honoring it.
+    ForwarderOnlyCannotHaveForwardsInto,
 }
 
 impl core::fmt::Display for PublishSubscribeCreateError {
@@ -166,6 +222,67 @@ impl From<ServiceAvailabilityState> for PublishSubscribeCreateError {
 enum ServiceAvailabilityState {
     ServiceState(ServiceState),
     IncompatibleTypes,
+}
+
+/// Internal error from [`Builder::resolve_forwarding_lists`], mapped onto
+/// either [`PublishSubscribeCreateError`] or [`PublishSubscribeOpenError`]
+/// depending on the calling path.
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+enum ForwardingValidationError {
+    ExceedsCapacity,
+    DuplicateEntry,
+    ForwardsIntoContainsSelf,
+    AcceptsForwardersFromContainsSelf,
+    NativeOnlyCannotAcceptForwarders,
+    ForwarderOnlyCannotHaveForwardsInto,
+}
+
+impl ForwardingValidationError {
+    fn into_create_error(self) -> PublishSubscribeCreateError {
+        match self {
+            Self::ExceedsCapacity => {
+                PublishSubscribeCreateError::ForwardingTargetsExceedsCapacity
+            }
+            Self::DuplicateEntry => {
+                PublishSubscribeCreateError::ForwardingTargetsContainsDuplicate
+            }
+            Self::ForwardsIntoContainsSelf => {
+                PublishSubscribeCreateError::ForwardingTargetsContainsSelf
+            }
+            Self::AcceptsForwardersFromContainsSelf => {
+                PublishSubscribeCreateError::AcceptsForwardersFromContainsSelf
+            }
+            Self::NativeOnlyCannotAcceptForwarders => {
+                PublishSubscribeCreateError::NativeOnlyCannotAcceptForwarders
+            }
+            Self::ForwarderOnlyCannotHaveForwardsInto => {
+                PublishSubscribeCreateError::ForwarderOnlyCannotHaveForwardsInto
+            }
+        }
+    }
+
+    fn into_open_error(self) -> PublishSubscribeOpenError {
+        match self {
+            Self::ExceedsCapacity => {
+                PublishSubscribeOpenError::ForwardingTargetsExceedsCapacity
+            }
+            Self::DuplicateEntry => {
+                PublishSubscribeOpenError::ForwardingTargetsContainsDuplicate
+            }
+            Self::ForwardsIntoContainsSelf => {
+                PublishSubscribeOpenError::ForwardingTargetsContainsSelf
+            }
+            Self::AcceptsForwardersFromContainsSelf => {
+                PublishSubscribeOpenError::AcceptsForwardersFromContainsSelf
+            }
+            Self::NativeOnlyCannotAcceptForwarders => {
+                PublishSubscribeOpenError::NativeOnlyCannotAcceptForwarders
+            }
+            Self::ForwarderOnlyCannotHaveForwardsInto => {
+                PublishSubscribeOpenError::ForwarderOnlyCannotHaveForwardsInto
+            }
+        }
+    }
 }
 
 /// Errors that can occur when a [`MessagingPattern::PublishSubscribe`] [`Service`] shall be
@@ -229,6 +346,11 @@ pub struct Builder<
     verify_publisher_history_size: bool,
     verify_enable_safe_overflow: bool,
     verify_max_nodes: bool,
+    verify_publisher_mode: bool,
+    verify_forwards_into: bool,
+    verify_accepts_forwarders_from: bool,
+    requested_forwards_into: Option<alloc::vec::Vec<ServiceName>>,
+    requested_accepts_forwarders_from: Option<alloc::vec::Vec<ServiceName>>,
     _data: PhantomData<Payload>,
     _user_header: PhantomData<UserHeader>,
 }
@@ -252,6 +374,11 @@ impl<
             verify_publisher_history_size: self.verify_publisher_history_size,
             verify_enable_safe_overflow: self.verify_enable_safe_overflow,
             verify_max_nodes: self.verify_max_nodes,
+            verify_publisher_mode: self.verify_publisher_mode,
+            verify_forwards_into: self.verify_forwards_into,
+            verify_accepts_forwarders_from: self.verify_accepts_forwarders_from,
+            requested_forwards_into: self.requested_forwards_into.clone(),
+            requested_accepts_forwarders_from: self.requested_accepts_forwarders_from.clone(),
             _data: PhantomData,
             _user_header: PhantomData,
         }
@@ -274,6 +401,11 @@ impl<
             verify_subscriber_max_borrowed_samples: false,
             verify_enable_safe_overflow: false,
             verify_max_nodes: false,
+            verify_publisher_mode: false,
+            verify_forwards_into: false,
+            verify_accepts_forwarders_from: false,
+            requested_forwards_into: None,
+            requested_accepts_forwarders_from: None,
             override_alignment: None,
             override_payload_type: None,
             override_user_header_type: None,
@@ -406,6 +538,62 @@ impl<
         self
     }
 
+    /// Sets the [`PublisherMode`] for this [`Service`]. When the [`Service`] is
+    /// created, this controls whether native publishers, forwarder
+    /// participations, or both may attach. When opening an existing
+    /// [`Service`], the requested mode must match exactly. Defaults to
+    /// [`PublisherMode::Mixed`].
+    pub fn publisher_mode(mut self, mode: PublisherMode) -> Self {
+        self.config_details_mut().publisher_mode = mode;
+        self.verify_publisher_mode = true;
+        self
+    }
+
+    /// Declares the target services that this [`Service`]'s publishers may
+    /// forward into. When the [`Service`] is created, this list defines the
+    /// authorized outbound forwarding routes for buckets allocated by this
+    /// service's native publishers. When opening an existing [`Service`], the
+    /// requested list must match the stored list exactly (order included, since
+    /// the position of each entry is the stable target index).
+    ///
+    /// The list may contain at most
+    /// [`MAX_FORWARDING_TARGETS_PER_SERVICE`](crate::service::static_config::publish_subscribe::MAX_FORWARDING_TARGETS_PER_SERVICE)
+    /// entries, must not contain duplicates, and must not contain this
+    /// service's own name. Violations are surfaced as structured errors when
+    /// [`open_or_create`](Self::open_or_create) / [`create`](Self::create) is
+    /// called.
+    pub fn forwards_into<I>(mut self, targets: I) -> Self
+    where
+        I: IntoIterator<Item = ServiceName>,
+    {
+        let collected: alloc::vec::Vec<ServiceName> = targets.into_iter().collect();
+        self.requested_forwards_into = Some(collected);
+        self.verify_forwards_into = true;
+        self
+    }
+
+    /// Declares the source services whose forwarded buckets this [`Service`]
+    /// will accept. When the [`Service`] is created, this list defines the
+    /// authorized inbound forwarding sources. When opening an existing
+    /// [`Service`], the requested list must match the stored list exactly
+    /// (order included).
+    ///
+    /// The list may contain at most
+    /// [`MAX_FORWARDING_TARGETS_PER_SERVICE`](crate::service::static_config::publish_subscribe::MAX_FORWARDING_TARGETS_PER_SERVICE)
+    /// entries, must not contain duplicates, and must not contain this
+    /// service's own name. Violations are surfaced as structured errors when
+    /// [`open_or_create`](Self::open_or_create) / [`create`](Self::create) is
+    /// called.
+    pub fn accepts_forwarders_from<I>(mut self, sources: I) -> Self
+    where
+        I: IntoIterator<Item = ServiceName>,
+    {
+        let collected: alloc::vec::Vec<ServiceName> = sources.into_iter().collect();
+        self.requested_accepts_forwarders_from = Some(collected);
+        self.verify_accepts_forwarders_from = true;
+        self
+    }
+
     /// Validates configuration and overrides the invalid setting with meaningful values.
     fn adjust_configuration_to_meaningful_values(&mut self) {
         let origin = format!("{self:?}");
@@ -440,6 +628,68 @@ impl<
                 "Setting the maximum amount of nodes to 0 is not supported. Adjust it to 1, the smallest supported value.");
             settings.max_nodes = 1;
         }
+    }
+
+    /// Materializes any `requested_forwards_into` /
+    /// `requested_accepts_forwarders_from` lists into validated
+    /// [`ForwardingTargets`] values stored in the static config. Surfaces
+    /// structured errors for over-capacity, duplicate, or self-referential
+    /// lists.
+    fn resolve_forwarding_lists(
+        &mut self,
+    ) -> Result<(), ForwardingValidationError> {
+        let own_name = *self.base.service_config.name();
+        let targets_opt = self.requested_forwards_into.clone();
+        let sources_opt = self.requested_accepts_forwarders_from.clone();
+
+        if let Some(targets) = targets_opt {
+            if targets.iter().any(|n| n == &own_name) {
+                return Err(ForwardingValidationError::ForwardsIntoContainsSelf);
+            }
+            let list = ForwardingTargets::from_slice(&targets).map_err(|e| match e {
+                ForwardingTargetsError::ExceedsCapacity => {
+                    ForwardingValidationError::ExceedsCapacity
+                }
+                ForwardingTargetsError::DuplicateEntry => {
+                    ForwardingValidationError::DuplicateEntry
+                }
+            })?;
+            self.config_details_mut().forwards_into = list;
+        }
+        if let Some(sources) = sources_opt {
+            if sources.iter().any(|n| n == &own_name) {
+                return Err(ForwardingValidationError::AcceptsForwardersFromContainsSelf);
+            }
+            let list = ForwardingTargets::from_slice(&sources).map_err(|e| match e {
+                ForwardingTargetsError::ExceedsCapacity => {
+                    ForwardingValidationError::ExceedsCapacity
+                }
+                ForwardingTargetsError::DuplicateEntry => {
+                    ForwardingValidationError::DuplicateEntry
+                }
+            })?;
+            self.config_details_mut().accepts_forwarders_from = list;
+        }
+
+        // Cross-field consistency: NativeOnly rejects all forwarders, so it
+        // cannot be paired with a non-empty accepts_forwarders_from list.
+        if self.config_details().publisher_mode == PublisherMode::NativeOnly
+            && !self.config_details().accepts_forwarders_from.is_empty()
+        {
+            return Err(ForwardingValidationError::NativeOnlyCannotAcceptForwarders);
+        }
+
+        // ForwarderOnly forbids native publishers, so a non-empty
+        // forwards_into list (which only takes effect through native
+        // publishers) would be a dead declaration. Reject at builder time so
+        // the user sees their mistake instead of being puzzled at runtime.
+        if self.config_details().publisher_mode == PublisherMode::ForwarderOnly
+            && !self.config_details().forwards_into.is_empty()
+        {
+            return Err(ForwardingValidationError::ForwarderOnlyCannotHaveForwardsInto);
+        }
+
+        Ok(())
     }
 
     fn verify_service_configuration(
@@ -521,6 +771,31 @@ impl<
                                 msg, existing_settings.max_nodes, required_settings.max_nodes);
         }
 
+        if self.verify_publisher_mode
+            && existing_settings.publisher_mode != required_settings.publisher_mode
+        {
+            fail!(from self, with PublishSubscribeOpenError::IncompatiblePublisherMode,
+                "{} since the service publisher_mode is {:?} but {:?} was requested.",
+                msg, existing_settings.publisher_mode, required_settings.publisher_mode);
+        }
+
+        if self.verify_forwards_into
+            && existing_settings.forwards_into != required_settings.forwards_into
+        {
+            fail!(from self, with PublishSubscribeOpenError::IncompatibleForwardsInto,
+                "{} since the service forwards_into list is {:?} but {:?} was requested.",
+                msg, existing_settings.forwards_into, required_settings.forwards_into);
+        }
+
+        if self.verify_accepts_forwarders_from
+            && existing_settings.accepts_forwarders_from
+                != required_settings.accepts_forwarders_from
+        {
+            fail!(from self, with PublishSubscribeOpenError::IncompatibleAcceptsForwardersFrom,
+                "{} since the service accepts_forwarders_from list is {:?} but {:?} was requested.",
+                msg, existing_settings.accepts_forwarders_from, required_settings.accepts_forwarders_from);
+        }
+
         Ok(*existing_settings)
     }
 
@@ -532,6 +807,14 @@ impl<
         PublishSubscribeCreateError,
     > {
         self.adjust_configuration_to_meaningful_values();
+
+        if let Err(e) = self.resolve_forwarding_lists() {
+            let msg = "Unable to create publish subscribe service";
+            let create_error = e.into_create_error();
+            fail!(from self, with create_error,
+                "{} since the requested forwarding declarations are invalid ({:?}).",
+                msg, e);
+        }
 
         let msg = "Unable to create publish subscribe service";
 
@@ -637,6 +920,13 @@ impl<
         PublishSubscribeOpenError,
     > {
         let msg = "Unable to open publish subscribe service";
+
+        if let Err(e) = self.resolve_forwarding_lists() {
+            let open_error = e.into_open_error();
+            fail!(from self, with open_error,
+                "{} since the requested forwarding declarations are invalid ({:?}).",
+                msg, e);
+        }
 
         let mut service_open_retry_count = 0;
         loop {

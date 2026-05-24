@@ -187,7 +187,7 @@ impl ServiceBuilderUnion {
 #[repr(C)]
 #[repr(align(8))] // alignment of Option<ServiceBuilderUnion>
 pub struct iox2_service_builder_storage_t {
-    internal: [u8; 9104], // magic number obtained with size_of::<Option<ServiceBuilderUnion>>()
+    internal: [u8; 10240], // magic number obtained with size_of::<Option<ServiceBuilderUnion>>()
 }
 
 #[repr(C)]

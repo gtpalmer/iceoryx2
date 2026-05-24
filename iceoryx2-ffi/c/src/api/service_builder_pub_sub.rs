@@ -91,6 +91,36 @@ pub enum iox2_pub_sub_open_or_create_error_e {
     C_OLD_CONNECTION_STILL_ACTIVE,
     #[CStr = "hangs in creation"]
     C_HANGS_IN_CREATION,
+    #[CStr = "incompatible publisher mode"]
+    O_INCOMPATIBLE_PUBLISHER_MODE,
+    #[CStr = "incompatible forwards_into"]
+    O_INCOMPATIBLE_FORWARDS_INTO,
+    #[CStr = "incompatible accepts_forwarders_from"]
+    O_INCOMPATIBLE_ACCEPTS_FORWARDERS_FROM,
+    #[CStr = "forwarding targets exceeds capacity"]
+    O_FORWARDING_TARGETS_EXCEEDS_CAPACITY,
+    #[CStr = "forwarding targets contains duplicate"]
+    O_FORWARDING_TARGETS_CONTAINS_DUPLICATE,
+    #[CStr = "forwards_into contains self"]
+    O_FORWARDING_TARGETS_CONTAINS_SELF,
+    #[CStr = "accepts_forwarders_from contains self"]
+    O_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF,
+    #[CStr = "forwarding targets exceeds capacity"]
+    C_FORWARDING_TARGETS_EXCEEDS_CAPACITY,
+    #[CStr = "forwarding targets contains duplicate"]
+    C_FORWARDING_TARGETS_CONTAINS_DUPLICATE,
+    #[CStr = "forwards_into contains self"]
+    C_FORWARDING_TARGETS_CONTAINS_SELF,
+    #[CStr = "accepts_forwarders_from contains self"]
+    C_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF,
+    #[CStr = "NativeOnly publisher mode cannot accept forwarders"]
+    O_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS,
+    #[CStr = "NativeOnly publisher mode cannot accept forwarders"]
+    C_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS,
+    #[CStr = "ForwarderOnly publisher mode cannot have forwards_into"]
+    O_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO,
+    #[CStr = "ForwarderOnly publisher mode cannot have forwards_into"]
+    C_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO,
     #[CStr = "same service is created and removed repeatedly"]
     SYSTEM_IN_FLUX,
 }
@@ -147,6 +177,33 @@ impl IntoCInt for PublishSubscribeOpenError {
          PublishSubscribeOpenError::IsMarkedForDestruction => {
              iox2_pub_sub_open_or_create_error_e::O_IS_MARKED_FOR_DESTRUCTION
          }
+         PublishSubscribeOpenError::IncompatiblePublisherMode => {
+             iox2_pub_sub_open_or_create_error_e::O_INCOMPATIBLE_PUBLISHER_MODE
+         }
+         PublishSubscribeOpenError::IncompatibleForwardsInto => {
+             iox2_pub_sub_open_or_create_error_e::O_INCOMPATIBLE_FORWARDS_INTO
+         }
+         PublishSubscribeOpenError::IncompatibleAcceptsForwardersFrom => {
+             iox2_pub_sub_open_or_create_error_e::O_INCOMPATIBLE_ACCEPTS_FORWARDERS_FROM
+         }
+         PublishSubscribeOpenError::ForwardingTargetsExceedsCapacity => {
+             iox2_pub_sub_open_or_create_error_e::O_FORWARDING_TARGETS_EXCEEDS_CAPACITY
+         }
+         PublishSubscribeOpenError::ForwardingTargetsContainsDuplicate => {
+             iox2_pub_sub_open_or_create_error_e::O_FORWARDING_TARGETS_CONTAINS_DUPLICATE
+         }
+         PublishSubscribeOpenError::ForwardingTargetsContainsSelf => {
+             iox2_pub_sub_open_or_create_error_e::O_FORWARDING_TARGETS_CONTAINS_SELF
+         }
+         PublishSubscribeOpenError::AcceptsForwardersFromContainsSelf => {
+             iox2_pub_sub_open_or_create_error_e::O_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF
+         }
+         PublishSubscribeOpenError::NativeOnlyCannotAcceptForwarders => {
+             iox2_pub_sub_open_or_create_error_e::O_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS
+         }
+         PublishSubscribeOpenError::ForwarderOnlyCannotHaveForwardsInto => {
+             iox2_pub_sub_open_or_create_error_e::O_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO
+         }
         }) as c_int
     }
 }
@@ -173,6 +230,24 @@ impl IntoCInt for PublishSubscribeCreateError {
          PublishSubscribeCreateError::HangsInCreation => {
              iox2_pub_sub_open_or_create_error_e::C_HANGS_IN_CREATION
          }
+            PublishSubscribeCreateError::ForwardingTargetsExceedsCapacity => {
+                iox2_pub_sub_open_or_create_error_e::C_FORWARDING_TARGETS_EXCEEDS_CAPACITY
+            }
+            PublishSubscribeCreateError::ForwardingTargetsContainsDuplicate => {
+                iox2_pub_sub_open_or_create_error_e::C_FORWARDING_TARGETS_CONTAINS_DUPLICATE
+            }
+            PublishSubscribeCreateError::ForwardingTargetsContainsSelf => {
+                iox2_pub_sub_open_or_create_error_e::C_FORWARDING_TARGETS_CONTAINS_SELF
+            }
+            PublishSubscribeCreateError::AcceptsForwardersFromContainsSelf => {
+                iox2_pub_sub_open_or_create_error_e::C_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF
+            }
+            PublishSubscribeCreateError::NativeOnlyCannotAcceptForwarders => {
+                iox2_pub_sub_open_or_create_error_e::C_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS
+            }
+            PublishSubscribeCreateError::ForwarderOnlyCannotHaveForwardsInto => {
+                iox2_pub_sub_open_or_create_error_e::C_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO
+            }
         }) as c_int
     }
 }

@@ -3864,4 +3864,367 @@ pub mod service_publish_subscribe {
         let recv_res = subscriber.receive();
         assert_that!(recv_res, is_ok);
     }
+
+    // -----------------------------------------------------------------
+    // Publish-subscribe forwarding (Milestone 1: configuration surface)
+    // See doc/design-documents/publish-subscribe-forwarding.md
+    // -----------------------------------------------------------------
+
+    #[conformance_test]
+    pub fn forwarding_defaults_are_inert<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .create()
+            .unwrap();
+
+        let static_config = sut.static_config();
+        assert_that!(static_config.publisher_mode(), eq PublisherMode::Mixed);
+        assert_that!(static_config.forwards_into().is_empty(), eq true);
+        assert_that!(static_config.accepts_forwarders_from().is_empty(), eq true);
+    }
+
+    #[conformance_test]
+    pub fn forwards_into_persists_declared_targets<Sut: Service>() {
+        let service_name = generate_service_name();
+        let target_a: ServiceName = "fwd/target_a".try_into().unwrap();
+        let target_b: ServiceName = "fwd/target_b".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_a, target_b])
+            .create()
+            .unwrap();
+
+        let forwards = sut.static_config().forwards_into();
+        assert_that!(forwards.len(), eq 2);
+        assert_that!(forwards.get(0), eq Some(&target_a));
+        assert_that!(forwards.get(1), eq Some(&target_b));
+        assert_that!(forwards.contains(&target_a), eq true);
+        assert_that!(forwards.contains(&target_b), eq true);
+    }
+
+    #[conformance_test]
+    pub fn accepts_forwarders_from_persists_declared_sources<Sut: Service>() {
+        let service_name = generate_service_name();
+        let source_a: ServiceName = "fwd/source_a".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_a])
+            .create()
+            .unwrap();
+
+        let accepts = sut.static_config().accepts_forwarders_from();
+        assert_that!(accepts.len(), eq 1);
+        assert_that!(accepts.get(0), eq Some(&source_a));
+    }
+
+    #[conformance_test]
+    pub fn publisher_mode_persists<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        assert_that!(
+            sut.static_config().publisher_mode(),
+            eq PublisherMode::ForwarderOnly
+        );
+    }
+
+    #[conformance_test]
+    pub fn forwarder_only_rejects_native_publisher<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let result = sut.publisher_builder().create();
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublisherCreateError::NativePublisherRejectedByForwarderOnlyService
+        );
+    }
+
+    #[conformance_test]
+    pub fn native_only_permits_native_publisher<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::NativeOnly)
+            .create()
+            .unwrap();
+
+        let publisher = sut.publisher_builder().create();
+        assert_that!(publisher, is_ok);
+    }
+
+    #[conformance_test]
+    pub fn open_with_matching_forwarding_config_succeeds<Sut: Service>() {
+        let service_name = generate_service_name();
+        let target: ServiceName = "fwd/match_target".try_into().unwrap();
+        let source: ServiceName = "fwd/match_source".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let _created = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target])
+            .accepts_forwarders_from(vec![source])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let opened = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target])
+            .accepts_forwarders_from(vec![source])
+            .publisher_mode(PublisherMode::Mixed)
+            .open();
+
+        assert_that!(opened, is_ok);
+    }
+
+    #[conformance_test]
+    pub fn open_with_mismatched_publisher_mode_fails<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let _created = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let opened = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .open();
+
+        assert_that!(opened.is_err(), eq true);
+        assert_that!(
+            opened.err().unwrap(),
+            eq PublishSubscribeOpenError::IncompatiblePublisherMode
+        );
+    }
+
+    #[conformance_test]
+    pub fn open_with_mismatched_forwards_into_fails<Sut: Service>() {
+        let service_name = generate_service_name();
+        let target_a: ServiceName = "fwd/mismatch_a".try_into().unwrap();
+        let target_b: ServiceName = "fwd/mismatch_b".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let _created = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_a])
+            .create()
+            .unwrap();
+
+        let opened = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_b])
+            .open();
+
+        assert_that!(opened.is_err(), eq true);
+        assert_that!(
+            opened.err().unwrap(),
+            eq PublishSubscribeOpenError::IncompatibleForwardsInto
+        );
+    }
+
+    #[conformance_test]
+    pub fn create_with_self_in_forwards_into_fails<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![service_name])
+            .create();
+
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublishSubscribeCreateError::ForwardingTargetsContainsSelf
+        );
+    }
+
+    #[conformance_test]
+    pub fn create_with_duplicate_forwards_into_fails<Sut: Service>() {
+        let service_name = generate_service_name();
+        let target: ServiceName = "fwd/dup_target".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target, target])
+            .create();
+
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublishSubscribeCreateError::ForwardingTargetsContainsDuplicate
+        );
+    }
+
+    #[conformance_test]
+    pub fn create_with_native_only_and_accepts_forwarders_from_fails<Sut: Service>() {
+        let service_name = generate_service_name();
+        let source: ServiceName = "fwd/conflict_source".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::NativeOnly)
+            .accepts_forwarders_from(vec![source])
+            .create();
+
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublishSubscribeCreateError::NativeOnlyCannotAcceptForwarders
+        );
+    }
+
+    #[conformance_test]
+    pub fn native_only_with_empty_accepts_forwarders_from_succeeds<Sut: Service>() {
+        let service_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::NativeOnly)
+            .create();
+
+        assert_that!(result, is_ok);
+    }
+
+    #[conformance_test]
+    pub fn native_only_with_forwards_into_succeeds<Sut: Service>() {
+        let service_name = generate_service_name();
+        let target: ServiceName = "fwd/native_target".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        // forwards_into is outbound; NativeOnly only constrains inbound
+        // forwarder participations. The two declarations are orthogonal.
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::NativeOnly)
+            .forwards_into(vec![target])
+            .create();
+
+        assert_that!(result, is_ok);
+    }
+
+    #[conformance_test]
+    pub fn create_with_forwarder_only_and_forwards_into_fails<Sut: Service>() {
+        let service_name = generate_service_name();
+        let target: ServiceName = "fwd/dead_target".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        // forwards_into describes the outbound routes of native publishers,
+        // but ForwarderOnly forbids native publishers — so the declaration
+        // would have no runtime effect and is rejected at builder time.
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .forwards_into(vec![target])
+            .create();
+
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublishSubscribeCreateError::ForwarderOnlyCannotHaveForwardsInto
+        );
+    }
+
+    #[conformance_test]
+    pub fn forwarder_only_with_accepts_forwarders_from_succeeds<Sut: Service>() {
+        let service_name = generate_service_name();
+        let source: ServiceName = "fwd/derived_source".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .accepts_forwarders_from(vec![source])
+            .create();
+
+        assert_that!(result, is_ok);
+    }
+
+    #[conformance_test]
+    pub fn create_with_too_many_forwards_into_fails<Sut: Service>() {
+        use iceoryx2::service::static_config::publish_subscribe::MAX_FORWARDING_TARGETS_PER_SERVICE;
+        let service_name = generate_service_name();
+        let mut targets: Vec<ServiceName> = Vec::new();
+        for i in 0..(MAX_FORWARDING_TARGETS_PER_SERVICE + 1) {
+            targets.push(format!("fwd/many_{i}").as_str().try_into().unwrap());
+        }
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let result = node
+            .service_builder(&service_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(targets)
+            .create();
+
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublishSubscribeCreateError::ForwardingTargetsExceedsCapacity
+        );
+    }
 }

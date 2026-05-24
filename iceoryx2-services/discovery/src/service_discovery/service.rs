@@ -107,7 +107,8 @@ impl From<PublisherCreateError> for CreationError {
                 CreationError::PublisherAlreadyExists
             }
             PublisherCreateError::UnableToCreateDataSegment
-            | PublisherCreateError::FailedToDeployThreadsafetyPolicy => {
+            | PublisherCreateError::FailedToDeployThreadsafetyPolicy
+            | PublisherCreateError::NativePublisherRejectedByForwarderOnlyService => {
                 CreationError::PublisherCreationError
             }
         }

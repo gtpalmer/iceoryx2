@@ -45,6 +45,10 @@ pub mod writer;
 /// receiver is full and the service does not overflow.
 pub mod unable_to_deliver_strategy;
 
+/// Controls which kinds of publishers may attach to a publish-subscribe
+/// service in the presence of the forwarding extension.
+pub mod publisher_mode;
+
 pub use iceoryx2_cal::zero_copy_connection::UnableToDeliverToReceiverAction;
 
 /// Defines the action that shall be take when data cannot be delivered. Is used as
