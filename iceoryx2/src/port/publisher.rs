@@ -200,6 +200,14 @@ pub(crate) struct PublisherSharedState<Service: service::Service> {
     pub(crate) sender: Sender<Service>,
     subscriber_list_state: UnsafeCell<ContainerState<SubscriberDetails>>,
     history: Option<UnsafeCell<Queue<OffsetAndSize>>>,
+    /// Per-target forwarding state. One entry per declared `forwards_into`
+    /// target, in declaration order. Holds (a) the publisher's
+    /// forwarder-attachment handle in the target's dynamic config (for
+    /// drop-time deregistration), (b) the target's receiver-side
+    /// connection params, and (c) the per-target subscriber-connection
+    /// slots that M3d maintains and M3e will fan forwarded samples
+    /// through.
+    forwarding_targets: Vec<ForwardingTargetState<Service>>,
     is_active: AtomicBool,
 }
 
@@ -271,7 +279,120 @@ impl<Service: service::Service> PublisherSharedState<Service> {
                 "Connections were updated only partially since at least one connection to a Subscriber port failed.");
         }
 
+        if !self.forwarding_targets.is_empty() {
+            let mut any_changed = false;
+            for target in &self.forwarding_targets {
+                if unsafe {
+                    target
+                        .dynamic_storage
+                        .get()
+                        .publish_subscribe()
+                        .subscribers
+                        .update_state(&mut *target.target_subscriber_list_state.get())
+                } {
+                    any_changed = true;
+                }
+            }
+            if any_changed {
+                fail!(from self, when self.force_update_forwarding_connections(),
+                    "Forwarding connections were updated only partially since at least one connection to a target-service Subscriber port failed.");
+            }
+        }
+
         Ok(())
+    }
+
+    /// Refresh per-target forwarding connections. Mirrors
+    /// [`Self::force_update_connections`] but operates on each declared
+    /// `forwards_into` target's subscriber list, creating connections
+    /// with the target service's receiver-side parameters. Each target
+    /// keeps its own `CyclicTagger` so this sweep's bookkeeping is
+    /// independent of the source publisher's native-connection sweep.
+    pub(crate) fn force_update_forwarding_connections(
+        &self,
+    ) -> Result<(), ZeroCopyCreationError> {
+        use iceoryx2_bb_elementary::cyclic_tagger::Taggable;
+
+        let mut result = Ok(());
+        for target in &self.forwarding_targets {
+            target.tagger.next_cycle();
+
+            unsafe {
+                (*target.target_subscriber_list_state.get()).for_each(|index, port| {
+                    let receiver_details = ReceiverDetails {
+                        port_id: port.subscriber_id.value(),
+                        buffer_size: port.buffer_size,
+                    };
+
+                    let inner_result =
+                        self.update_forwarding_connection(target, index, receiver_details);
+
+                    if result.is_ok() {
+                        result = inner_result;
+                    }
+
+                    CallbackProgression::Continue
+                });
+            }
+
+            // Drop any connection slot that wasn't tagged in this sweep
+            // (subscriber detached).
+            for slot in target.connections.iter() {
+                let needs_remove = {
+                    let conn = unsafe { (*slot.get()).as_ref() };
+                    match conn {
+                        Some(c) => !c.was_tagged_by(&target.tagger),
+                        None => false,
+                    }
+                };
+                if needs_remove {
+                    unsafe { *slot.get() = None };
+                }
+            }
+        }
+
+        result
+    }
+
+    fn update_forwarding_connection(
+        &self,
+        target: &ForwardingTargetState<Service>,
+        index: usize,
+        receiver_details: ReceiverDetails,
+    ) -> Result<(), ZeroCopyCreationError> {
+        let slot = &target.connections[index];
+
+        let create_new = {
+            let existing = unsafe { (*slot.get()).as_ref() };
+            match existing {
+                None => true,
+                Some(c) => {
+                    let same = c.receiver_port_id == receiver_details.port_id;
+                    if same {
+                        target.tagger.tag(c);
+                    } else {
+                        unsafe { *slot.get() = None };
+                    }
+                    !same
+                }
+            }
+        };
+
+        if !create_new {
+            return Ok(());
+        }
+
+        match self.sender.build_forwarding_target_connection(
+            receiver_details,
+            target.target_connection_params,
+            target.tagger.create_tag(),
+        ) {
+            Ok(c) => {
+                unsafe { *slot.get() = Some(c) };
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn deliver_sample_history(&self, connection: &Connection<Service>) {
@@ -327,16 +448,35 @@ impl<Service: service::Service> PublisherSharedState<Service> {
     }
 }
 
-/// A registration of this publisher as a forwarder participant on a target
-/// service. Owns the target service's dynamic storage (to keep it alive)
-/// and the [`ContainerHandle`] used to deregister at drop time.
-struct ForwarderAttachment<Service: service::Service> {
+/// Per-target forwarding state held by `PublisherSharedState`.
+///
+/// Each declared `forwards_into` target produces one of these. It owns:
+///
+/// * the target service's dynamic storage (so it stays mapped),
+/// * the publisher's `ContainerHandle` registration as a forwarder
+///   participant on the target's publisher container (released on drop),
+/// * a `ContainerState` snapshot of the target's subscriber container
+///   so `force_update_forwarding_connections` can detect attach/detach,
+/// * the target-side connection parameters (used to size each
+///   per-subscriber connection),
+/// * the per-target subscriber-connection slots that M3e will dispatch
+///   forwarded offsets onto.
+struct ForwardingTargetState<Service: service::Service> {
     dynamic_storage: Service::DynamicStorage<crate::service::dynamic_config::DynamicConfig>,
     handle: ContainerHandle,
     target_name: ServiceName,
+    target_subscriber_list_state: UnsafeCell<ContainerState<SubscriberDetails>>,
+    target_connection_params: ForwardingTargetConnectionParams,
+    connections: Vec<UnsafeCell<Option<Connection<Service>>>>,
+    /// Per-target cyclic tagger used by
+    /// `force_update_forwarding_connections` to detect detached
+    /// target-side subscribers. Independent of the source publisher's
+    /// `Sender::tagger`, because forwarding-connection sweeps may run
+    /// without (or in different cadence than) native sweeps.
+    tagger: iceoryx2_bb_elementary::cyclic_tagger::CyclicTagger,
 }
 
-impl<Service: service::Service> Drop for ForwarderAttachment<Service> {
+impl<Service: service::Service> Drop for ForwardingTargetState<Service> {
     fn drop(&mut self) {
         self.dynamic_storage
             .get()
@@ -345,10 +485,11 @@ impl<Service: service::Service> Drop for ForwarderAttachment<Service> {
     }
 }
 
-impl<Service: service::Service> core::fmt::Debug for ForwarderAttachment<Service> {
+impl<Service: service::Service> core::fmt::Debug for ForwardingTargetState<Service> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ForwarderAttachment")
+        f.debug_struct("ForwardingTargetState")
             .field("target_name", &self.target_name)
+            .field("connection_slots", &self.connections.len())
             .finish()
     }
 }
@@ -363,7 +504,6 @@ pub struct Publisher<
     pub(crate) publisher_shared_state:
         Service::ArcThreadSafetyPolicy<PublisherSharedState<Service>>,
     dynamic_publisher_handle: Option<ContainerHandle>,
-    forwarder_attachments: Vec<ForwarderAttachment<Service>>,
     _payload: PhantomData<Payload>,
     _user_header: PhantomData<UserHeader>,
 }
@@ -519,6 +659,110 @@ impl<
                 with PublisherCreateError::UnableToCreateDataSegment,
                 "{} since the data segment could not be acquired.", msg);
 
+        // Build per-target forwarding state *before* constructing
+        // `PublisherSharedState`. If any target attachment fails, the
+        // local `forwarding_targets` Vec is dropped on early return,
+        // releasing any partially-registered handles via
+        // `ForwardingTargetState::Drop`. The publisher is never
+        // registered on the source service in that case.
+        let source_service_name = *service.static_config().name();
+        let source_service_id = service.static_config().unique_service_id();
+        let forwards_into = static_config.forwards_into;
+        let shared_node_for_targets = service.shared_node().clone();
+        let forwarder_details = PublisherDetails {
+            participation:
+                crate::service::dynamic_config::publish_subscribe::PublisherParticipation::
+                    Forwarder {
+                        source_service: source_service_id,
+                    },
+            ..publisher_details
+        };
+        let source_message_type_details = static_config.message_type_details;
+        let mut forwarding_targets: Vec<ForwardingTargetState<Service>> =
+            Vec::with_capacity(forwards_into.len());
+        for target_name in forwards_into.iter() {
+            let (target_static, target_dynamic_storage) =
+                match crate::service::builder::open_target_service_for_forwarder_attach::<Service>(
+                    shared_node_for_targets.clone(),
+                    target_name,
+                    &source_message_type_details,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fail!(from origin,
+                            with PublisherCreateError::ForwardingTargetServiceUnavailable,
+                            "{} since the forwarding target service {:?} could not be opened for forwarder attach ({:?}).",
+                            msg, target_name, e);
+                    }
+                };
+
+            if !target_static
+                .accepts_forwarders_from
+                .contains(&source_service_name)
+            {
+                fail!(from origin,
+                    with PublisherCreateError::ForwardingTargetRejectsSourceService,
+                    "{} since the forwarding target service {:?} does not list source service {:?} in its accepts_forwarders_from declaration.",
+                    msg, target_name, source_service_name);
+            }
+
+            let handle = match target_dynamic_storage
+                .get()
+                .publish_subscribe()
+                .add_publisher_id(forwarder_details)
+            {
+                Some(h) => h,
+                None => {
+                    fail!(from origin,
+                        with PublisherCreateError::ForwardingTargetExceedsMaxPublishers,
+                        "{} since the forwarding target service {:?} has reached its max_publishers limit and cannot accept this forwarder.",
+                        msg, target_name);
+                }
+            };
+
+            let target_subscriber_list_state = UnsafeCell::new(unsafe {
+                target_dynamic_storage
+                    .get()
+                    .publish_subscribe()
+                    .subscribers
+                    .get_state()
+            });
+            let target_subscriber_capacity = target_dynamic_storage
+                .get()
+                .publish_subscribe()
+                .subscribers
+                .capacity();
+            // Forwarding-connection sidetable is sized to the target's
+            // completion queue (target_max_buffer + target_max_borrowed
+            // + 1). The target service's `forwards_into` may or may not
+            // be empty; we always allocate so that a target subscriber
+            // forwarding our buckets onward can write Forward entries
+            // back. M3a's R10 bitmap (on the source publisher) is what
+            // gates duplicates.
+            let target_sidetable_capacity = target_static.subscriber_max_buffer_size
+                + target_static.subscriber_max_borrowed_samples
+                + 1;
+            let target_connection_params = ForwardingTargetConnectionParams {
+                max_buffer_size: target_static.subscriber_max_buffer_size,
+                max_borrowed_samples: target_static.subscriber_max_borrowed_samples,
+                enable_safe_overflow: target_static.enable_safe_overflow,
+                wide_entry_sidetable_capacity_per_channel: target_sidetable_capacity,
+            };
+            let connections = (0..target_subscriber_capacity)
+                .map(|_| UnsafeCell::new(None))
+                .collect();
+
+            forwarding_targets.push(ForwardingTargetState {
+                dynamic_storage: target_dynamic_storage,
+                handle,
+                target_name: *target_name,
+                target_subscriber_list_state,
+                target_connection_params,
+                connections,
+                tagger: iceoryx2_bb_elementary::cyclic_tagger::CyclicTagger::new(),
+            });
+        }
+
         let publisher_shared_state =
             <Service as service::Service>::ArcThreadSafetyPolicy::new(PublisherSharedState {
                 is_active: AtomicBool::new(true),
@@ -575,6 +819,7 @@ impl<
                     true => None,
                     false => Some(UnsafeCell::new(Queue::new(static_config.history_size))),
                 },
+                forwarding_targets,
             });
 
         let publisher_shared_state = match publisher_shared_state {
@@ -589,85 +834,20 @@ impl<
         let mut new_self = Self {
             publisher_shared_state,
             dynamic_publisher_handle: None,
-            forwarder_attachments: Vec::new(),
             _payload: PhantomData,
             _user_header: PhantomData,
         };
 
-        if let Err(e) = new_self
-            .publisher_shared_state
-            .lock()
-            .force_update_connections()
         {
-            warn!(from new_self,
-                "The new Publisher port is unable to connect to every Subscriber port, caused by {:?}.", e);
-        }
-
-        core::sync::atomic::compiler_fence(Ordering::SeqCst);
-
-        // Attach to each declared forwarding target *before* registering on
-        // the source service. If any target attachment fails, the
-        // `forwarder_attachments` Vec is dropped on early return, releasing
-        // any partially-registered handles, and the source-service
-        // registration never happens — leaving the system clean.
-        let source_service_name = *service.static_config().name();
-        let source_service_id = service.static_config().unique_service_id();
-        let forwards_into = static_config.forwards_into;
-        let shared_node = service.shared_node().clone();
-        let forwarder_details = PublisherDetails {
-            participation:
-                crate::service::dynamic_config::publish_subscribe::PublisherParticipation::
-                    Forwarder {
-                        source_service: source_service_id,
-                    },
-            ..publisher_details
-        };
-        let source_message_type_details = static_config.message_type_details;
-        for target_name in forwards_into.iter() {
-            let (target_static, target_dynamic_storage) =
-                match crate::service::builder::open_target_service_for_forwarder_attach::<Service>(
-                    shared_node.clone(),
-                    target_name,
-                    &source_message_type_details,
-                ) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        fail!(from origin,
-                            with PublisherCreateError::ForwardingTargetServiceUnavailable,
-                            "{} since the forwarding target service {:?} could not be opened for forwarder attach ({:?}).",
-                            msg, target_name, e);
-                    }
-                };
-
-            if !target_static
-                .accepts_forwarders_from
-                .contains(&source_service_name)
-            {
-                fail!(from origin,
-                    with PublisherCreateError::ForwardingTargetRejectsSourceService,
-                    "{} since the forwarding target service {:?} does not list source service {:?} in its accepts_forwarders_from declaration.",
-                    msg, target_name, source_service_name);
+            let shared_state = new_self.publisher_shared_state.lock();
+            if let Err(e) = shared_state.force_update_connections() {
+                warn!(from new_self,
+                    "The new Publisher port is unable to connect to every Subscriber port, caused by {:?}.", e);
             }
-
-            let handle = match target_dynamic_storage
-                .get()
-                .publish_subscribe()
-                .add_publisher_id(forwarder_details)
-            {
-                Some(h) => h,
-                None => {
-                    fail!(from origin,
-                        with PublisherCreateError::ForwardingTargetExceedsMaxPublishers,
-                        "{} since the forwarding target service {:?} has reached its max_publishers limit and cannot accept this forwarder.",
-                        msg, target_name);
-                }
-            };
-
-            new_self.forwarder_attachments.push(ForwarderAttachment {
-                dynamic_storage: target_dynamic_storage,
-                handle,
-                target_name: *target_name,
-            });
+            if let Err(e) = shared_state.force_update_forwarding_connections() {
+                warn!(from new_self,
+                    "The new Publisher port is unable to connect to every forwarding-target Subscriber port, caused by {:?}.", e);
+            }
         }
 
         core::sync::atomic::compiler_fence(Ordering::SeqCst);
@@ -707,6 +887,32 @@ impl<
             .lock()
             .sender
             .unable_to_deliver_strategy
+    }
+
+    /// Test-only introspection: number of declared forwarding targets
+    /// for this publisher (mirrors the source service's `forwards_into`).
+    #[doc(hidden)]
+    pub fn __forwarding_target_count(&self) -> usize {
+        self.publisher_shared_state
+            .lock()
+            .forwarding_targets
+            .len()
+    }
+
+    /// Test-only introspection: number of currently-live forwarding
+    /// connections for the target at `target_index`. Returns 0 if
+    /// `target_index` is out of bounds.
+    #[doc(hidden)]
+    pub fn __forwarding_connection_count(&self, target_index: usize) -> usize {
+        let shared_state = self.publisher_shared_state.lock();
+        match shared_state.forwarding_targets.get(target_index) {
+            None => 0,
+            Some(target) => target
+                .connections
+                .iter()
+                .filter(|slot| unsafe { (*slot.get()).is_some() })
+                .count(),
+        }
     }
 }
 

@@ -4643,4 +4643,198 @@ pub mod service_publish_subscribe {
             eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
         );
     }
+
+    #[conformance_test]
+    pub fn forwarding_target_count_matches_forwards_into<Sut: Service>() {
+        // M3d: A publisher with N declared `forwards_into` targets has
+        // exactly N per-target forwarding-connection slot vectors. A
+        // publisher with no `forwards_into` declaration has zero.
+        let source_name = generate_service_name();
+        let target_a = generate_service_name();
+        let target_b = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_a, target_b])
+            .create()
+            .unwrap();
+        let _ta = node
+            .service_builder(&target_a)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+        let _tb = node
+            .service_builder(&target_b)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        assert_that!(publisher.__forwarding_target_count(), eq 2);
+
+        // A publisher on the target service (no forwards_into) has zero.
+        let native_name = generate_service_name();
+        let native = node
+            .service_builder(&native_name)
+            .publish_subscribe::<u64>()
+            .create()
+            .unwrap();
+        let native_pub = native.publisher_builder().create().unwrap();
+        assert_that!(native_pub.__forwarding_target_count(), eq 0);
+    }
+
+    #[conformance_test]
+    pub fn publisher_creates_forwarding_connection_to_existing_target_subscriber<Sut: Service>() {
+        // M3d: When a target-service subscriber exists at publisher
+        // create time, the publisher establishes one forwarding
+        // connection to it during the initial connection sweep.
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        // Subscriber on target exists *before* the source publisher.
+        let _target_subscriber = target.subscriber_builder().create().unwrap();
+        let publisher = source.publisher_builder().create().unwrap();
+
+        assert_that!(publisher.__forwarding_target_count(), eq 1);
+        assert_that!(publisher.__forwarding_connection_count(0), eq 1);
+    }
+
+    #[conformance_test]
+    pub fn publisher_observes_late_attaching_target_subscriber<Sut: Service>() {
+        // M3d: A target-service subscriber that attaches *after* the
+        // publisher is created becomes a forwarding connection on the
+        // next `update_connections` sweep — which is triggered by
+        // `send_copy` (and by any publisher send path).
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        // No target subscribers yet: connection count is zero.
+        assert_that!(publisher.__forwarding_connection_count(0), eq 0);
+
+        let _target_subscriber = target.subscriber_builder().create().unwrap();
+
+        // Triggering a send drives `update_connections`, which sweeps
+        // both native and forwarding subscriber lists. After this,
+        // the publisher has a forwarding connection to the new target
+        // subscriber.
+        publisher.send_copy(42u64).unwrap();
+        assert_that!(publisher.__forwarding_connection_count(0), eq 1);
+    }
+
+    #[conformance_test]
+    pub fn publisher_tears_down_forwarding_connection_when_target_subscriber_drops<Sut: Service>() {
+        // M3d: When a target-service subscriber drops, the publisher's
+        // forwarding-connection slot to it is reclaimed on the next
+        // sweep.
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let target_subscriber = target.subscriber_builder().create().unwrap();
+        let publisher = source.publisher_builder().create().unwrap();
+        assert_that!(publisher.__forwarding_connection_count(0), eq 1);
+
+        drop(target_subscriber);
+        // Trigger another sweep.
+        publisher.send_copy(7u64).unwrap();
+        assert_that!(publisher.__forwarding_connection_count(0), eq 0);
+    }
+
+    #[conformance_test]
+    pub fn publisher_forwarding_connection_counts_are_per_target<Sut: Service>() {
+        // M3d: Each declared `forwards_into` target has an independent
+        // connection list. Subscribers on target A do not appear in
+        // target B's forwarding-connection slot vector.
+        let source_name = generate_service_name();
+        let target_a = generate_service_name();
+        let target_b = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_a, target_b])
+            .create()
+            .unwrap();
+        let ta = node
+            .service_builder(&target_a)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+        let tb = node
+            .service_builder(&target_b)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        // Two subscribers on target_a, one on target_b.
+        let _sub_a1 = ta.subscriber_builder().create().unwrap();
+        let _sub_a2 = ta.subscriber_builder().create().unwrap();
+        let _sub_b1 = tb.subscriber_builder().create().unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        assert_that!(publisher.__forwarding_target_count(), eq 2);
+        assert_that!(publisher.__forwarding_connection_count(0), eq 2);
+        assert_that!(publisher.__forwarding_connection_count(1), eq 1);
+    }
 }

@@ -52,6 +52,21 @@ pub(crate) struct ReceiverDetails {
     pub(crate) buffer_size: usize,
 }
 
+/// Per-target receiver-side parameters needed to build a forwarding
+/// connection. Forwarding connections cross service boundaries, so the
+/// receiver-side limits (buffer size cap, borrowed-sample cap, overflow
+/// semantics) come from the *target* service's static configuration, not
+/// the source publisher's. The sender-side parameters (data segment
+/// count, segment cap, sender port id, channel count) are still taken
+/// from the source publisher.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ForwardingTargetConnectionParams {
+    pub(crate) max_buffer_size: usize,
+    pub(crate) max_borrowed_samples: usize,
+    pub(crate) enable_safe_overflow: bool,
+    pub(crate) wide_entry_sidetable_capacity_per_channel: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct Connection<Service: service::Service> {
     pub(crate) sender: <Service::Connection as ZeroCopyConnection>::Sender,
@@ -85,27 +100,57 @@ impl<Service: service::Service> Connection<Service> {
         tag: Tag,
         initial_channel_state: ChannelState,
     ) -> Result<Self, ZeroCopyCreationError> {
+        Self::new_with_receiver_params(
+            this,
+            receiver_port_id,
+            buffer_size,
+            number_of_samples,
+            tag,
+            initial_channel_state,
+            ReceiverSideParams {
+                max_buffer_size: this.receiver_max_buffer_size,
+                max_borrowed_samples: this.receiver_max_borrowed_samples,
+                enable_safe_overflow: this.enable_safe_overflow,
+                wide_entry_sidetable_capacity_per_channel: this
+                    .wide_entry_sidetable_capacity_per_channel,
+            },
+        )
+    }
+
+    /// Construct a connection where the receiver-side limits are
+    /// supplied explicitly rather than read off `Sender`. Used by the
+    /// forwarding pipeline (the target service may have different
+    /// receiver caps than the source publisher).
+    fn new_with_receiver_params(
+        this: &Sender<Service>,
+        receiver_port_id: u128,
+        buffer_size: usize,
+        number_of_samples: usize,
+        tag: Tag,
+        initial_channel_state: ChannelState,
+        receiver: ReceiverSideParams,
+    ) -> Result<Self, ZeroCopyCreationError> {
         let msg = format!(
             "Unable to establish connection to receiver port {:?} from sender port {:?}",
             receiver_port_id, this.sender_port_id
         );
-        if this.receiver_max_buffer_size < buffer_size {
+        if receiver.max_buffer_size < buffer_size {
             fail!(from this, with ZeroCopyCreationError::IncompatibleBufferSize,
                 "{} since the receiver buffer size {} exceeds the max receiver buffer size of {}.",
-                msg, buffer_size, this.receiver_max_buffer_size);
+                msg, buffer_size, receiver.max_buffer_size);
         }
 
         let sender = fail!(from this, when <Service::Connection as ZeroCopyConnection>::
                         Builder::new( &connection_name(this.sender_port_id, receiver_port_id))
                                 .config(&connection_config::<Service>(this.shared_node.config()))
                                 .buffer_size(buffer_size)
-                                .receiver_max_borrowed_samples_per_channel(this.receiver_max_borrowed_samples)
-                                .enable_safe_overflow(this.enable_safe_overflow)
+                                .receiver_max_borrowed_samples_per_channel(receiver.max_borrowed_samples)
+                                .enable_safe_overflow(receiver.enable_safe_overflow)
                                 .number_of_samples_per_segment(number_of_samples)
                                 .max_supported_shared_memory_segments(this.max_number_of_segments)
                                 .initial_channel_state(initial_channel_state)
                                 .number_of_channels(this.number_of_channels)
-                                .wide_entry_sidetable_capacity_per_channel(this.wide_entry_sidetable_capacity_per_channel)
+                                .wide_entry_sidetable_capacity_per_channel(receiver.wide_entry_sidetable_capacity_per_channel)
                                 .timeout(this.shared_node.config().global.creation_timeout)
                                 .create_sender(),
                         "{}.", msg);
@@ -116,6 +161,14 @@ impl<Service: service::Service> Connection<Service> {
             tag,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct ReceiverSideParams {
+    max_buffer_size: usize,
+    max_borrowed_samples: usize,
+    enable_safe_overflow: bool,
+    wide_entry_sidetable_capacity_per_channel: usize,
 }
 
 #[derive(Debug)]
@@ -442,6 +495,35 @@ impl<Service: service::Service> Sender<Service> {
         )?);
 
         Ok(())
+    }
+
+    /// Build a connection to a subscriber that belongs to a target
+    /// service, using the *target* service's receiver-side limits. The
+    /// caller (`PublisherSharedState::force_update_forwarding_connections`)
+    /// supplies a per-target `Tag` (each target keeps its own
+    /// `CyclicTagger` for connection-lifecycle bookkeeping) and stores
+    /// the returned connection in a per-target connection slot.
+    pub(crate) fn build_forwarding_target_connection(
+        &self,
+        receiver_details: ReceiverDetails,
+        target_params: ForwardingTargetConnectionParams,
+        tag: Tag,
+    ) -> Result<Connection<Service>, ZeroCopyCreationError> {
+        Connection::new_with_receiver_params(
+            self,
+            receiver_details.port_id,
+            receiver_details.buffer_size,
+            self.number_of_samples,
+            tag,
+            self.initial_channel_state,
+            ReceiverSideParams {
+                max_buffer_size: target_params.max_buffer_size,
+                max_borrowed_samples: target_params.max_borrowed_samples,
+                enable_safe_overflow: target_params.enable_safe_overflow,
+                wide_entry_sidetable_capacity_per_channel: target_params
+                    .wide_entry_sidetable_capacity_per_channel,
+            },
+        )
     }
 
     fn len(&self) -> usize {
