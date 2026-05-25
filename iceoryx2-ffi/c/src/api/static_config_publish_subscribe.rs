@@ -12,8 +12,10 @@
 
 #![allow(non_camel_case_types)]
 
+use iceoryx2::port::publisher_mode::PublisherMode;
 use iceoryx2::service::static_config::publish_subscribe::StaticConfig;
 
+use crate::api::iox2_publisher_mode_e;
 use crate::iox2_message_type_details_t;
 
 #[derive(Clone, Copy)]
@@ -26,6 +28,7 @@ pub struct iox2_static_config_publish_subscribe_t {
     pub subscriber_max_buffer_size: usize,
     pub subscriber_max_borrowed_samples: usize,
     pub enable_safe_overflow: bool,
+    pub publisher_mode: iox2_publisher_mode_e,
     pub message_type_details: iox2_message_type_details_t,
 }
 
@@ -39,6 +42,11 @@ impl From<&StaticConfig> for iox2_static_config_publish_subscribe_t {
             subscriber_max_buffer_size: c.subscriber_max_buffer_size(),
             subscriber_max_borrowed_samples: c.subscriber_max_borrowed_samples(),
             enable_safe_overflow: c.has_safe_overflow(),
+            publisher_mode: match c.publisher_mode() {
+                PublisherMode::Mixed => iox2_publisher_mode_e::MIXED,
+                PublisherMode::NativeOnly => iox2_publisher_mode_e::NATIVE_ONLY,
+                PublisherMode::ForwarderOnly => iox2_publisher_mode_e::FORWARDER_ONLY,
+            },
             message_type_details: c.message_type_details().into(),
         }
     }

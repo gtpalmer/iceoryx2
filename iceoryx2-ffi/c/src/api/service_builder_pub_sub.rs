@@ -16,7 +16,7 @@ use crate::api::{
     AssertNonNullHandle, HandleToType, IOX2_OK, IntoCInt, PayloadFfi, PortFactoryPubSubUnion,
     ServiceBuilderUnion, UserHeaderFfi, c_size_t, iox2_port_factory_pub_sub_h,
     iox2_port_factory_pub_sub_t, iox2_service_builder_pub_sub_h,
-    iox2_service_builder_pub_sub_h_ref, iox2_service_type_e,
+    iox2_service_builder_pub_sub_h_ref, iox2_service_name_ptr, iox2_service_type_e,
 };
 use crate::create_type_details;
 
@@ -34,6 +34,7 @@ use iceoryx2_log::fatal_panic;
 
 use core::ffi::{c_char, c_int};
 use core::mem::ManuallyDrop;
+use core::slice;
 
 use super::{iox2_attribute_specifier_h_ref, iox2_attribute_verifier_h_ref};
 
@@ -878,6 +879,160 @@ pub unsafe extern "C" fn iox2_service_builder_pub_sub_set_publisher_mode(
             }
         }
     }
+}
+
+/// Collects an array of `iox2_service_name_ptr` into a `Vec<ServiceName>`,
+/// returning `None` if any entry is null.
+unsafe fn collect_service_names(
+    names_ptr: *const iox2_service_name_ptr,
+    count: c_size_t,
+) -> Option<alloc::vec::Vec<ServiceName>> {
+    if count == 0 {
+        return Some(alloc::vec::Vec::new());
+    }
+    debug_assert!(!names_ptr.is_null());
+    let slice = unsafe { slice::from_raw_parts(names_ptr, count as usize) };
+    let mut out: alloc::vec::Vec<ServiceName> = alloc::vec::Vec::with_capacity(count as usize);
+    for &name_ptr in slice {
+        if name_ptr.is_null() {
+            return None;
+        }
+        out.push(*unsafe { &*name_ptr });
+    }
+    Some(out)
+}
+
+/// Declares the list of target services this publish-subscribe service may forward into.
+///
+/// The list is validated at service creation time (open / create call):
+/// duplicates, self-target, oversize lists, and conflicts with
+/// `publisher_mode` are reported as structured errors via the
+/// open-or-create error path.
+///
+/// Calling this method with `count = 0` clears any previously-declared
+/// targets. Calling it repeatedly replaces the previous list (not
+/// additive).
+///
+/// # Arguments
+///
+/// * `service_builder_handle` - Must be a valid
+///   [`iox2_service_builder_pub_sub_h_ref`] obtained by
+///   [`iox2_service_builder_pub_sub`](crate::iox2_service_builder_pub_sub).
+/// * `targets` - Pointer to an array of `count` non-null
+///   [`iox2_service_name_ptr`] handles. May be `NULL` if `count == 0`.
+/// * `count` - Number of entries in `targets`.
+///
+/// Returns `IOX2_OK` on success, or `-1` if any entry of `targets` is
+/// `NULL`. (Validity of the target service names themselves — existence,
+/// type compatibility, etc. — is checked at open / create time.)
+///
+/// # Safety
+///
+/// * `service_builder_handle` must be a valid handle.
+/// * `targets` must point to `count` valid, non-null
+///   `iox2_service_name_ptr` entries (each owned externally by the
+///   caller).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_service_builder_pub_sub_set_forwards_into(
+    service_builder_handle: iox2_service_builder_pub_sub_h_ref,
+    targets: *const iox2_service_name_ptr,
+    count: c_size_t,
+) -> c_int {
+    service_builder_handle.assert_non_null();
+
+    let names = match unsafe { collect_service_names(targets, count) } {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    unsafe {
+        let service_builder_struct = &mut *service_builder_handle.as_type();
+
+        match service_builder_struct.service_type {
+            iox2_service_type_e::IPC => {
+                let service_builder =
+                    ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+
+                let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
+                service_builder_struct.set(ServiceBuilderUnion::new_ipc_pub_sub(
+                    service_builder.forwards_into(names),
+                ));
+            }
+            iox2_service_type_e::LOCAL => {
+                let service_builder =
+                    ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+
+                let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
+                service_builder_struct.set(ServiceBuilderUnion::new_local_pub_sub(
+                    service_builder.forwards_into(names),
+                ));
+            }
+        }
+    }
+    IOX2_OK
+}
+
+/// Declares the list of source services this publish-subscribe service
+/// will accept forwarded buckets from. Symmetric to
+/// [`iox2_service_builder_pub_sub_set_forwards_into`].
+///
+/// Validation (duplicates, self-source, oversize lists, conflicts with
+/// `publisher_mode`) happens at open / create time.
+///
+/// # Arguments
+///
+/// * `service_builder_handle` - Must be a valid
+///   [`iox2_service_builder_pub_sub_h_ref`].
+/// * `sources` - Pointer to an array of `count` non-null
+///   [`iox2_service_name_ptr`] handles. May be `NULL` if `count == 0`.
+/// * `count` - Number of entries in `sources`.
+///
+/// Returns `IOX2_OK` on success, or `-1` if any entry of `sources` is
+/// `NULL`.
+///
+/// # Safety
+///
+/// * `service_builder_handle` must be a valid handle.
+/// * `sources` must point to `count` valid, non-null
+///   `iox2_service_name_ptr` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_service_builder_pub_sub_set_accepts_forwarders_from(
+    service_builder_handle: iox2_service_builder_pub_sub_h_ref,
+    sources: *const iox2_service_name_ptr,
+    count: c_size_t,
+) -> c_int {
+    service_builder_handle.assert_non_null();
+
+    let names = match unsafe { collect_service_names(sources, count) } {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    unsafe {
+        let service_builder_struct = &mut *service_builder_handle.as_type();
+
+        match service_builder_struct.service_type {
+            iox2_service_type_e::IPC => {
+                let service_builder =
+                    ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+
+                let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
+                service_builder_struct.set(ServiceBuilderUnion::new_ipc_pub_sub(
+                    service_builder.accepts_forwarders_from(names),
+                ));
+            }
+            iox2_service_type_e::LOCAL => {
+                let service_builder =
+                    ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+
+                let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
+                service_builder_struct.set(ServiceBuilderUnion::new_local_pub_sub(
+                    service_builder.accepts_forwarders_from(names),
+                ));
+            }
+        }
+    }
+    IOX2_OK
 }
 
 /// Opens a publish-subscribe service or creates the service if it does not exist and returns a port factory to create publishers and subscribers.
