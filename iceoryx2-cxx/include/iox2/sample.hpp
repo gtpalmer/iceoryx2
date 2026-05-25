@@ -13,10 +13,13 @@
 #ifndef IOX2_SAMPLE_HPP
 #define IOX2_SAMPLE_HPP
 
+#include "iox2/bb/expected.hpp"
 #include "iox2/bb/slice.hpp"
 #include "iox2/header_publish_subscribe.hpp"
 #include "iox2/internal/iceoryx2.hpp"
 #include "iox2/payload_info.hpp"
+#include "iox2/sample_forward_error.hpp"
+#include "iox2/service_name.hpp"
 #include "iox2/service_type.hpp"
 #include "iox2/unique_port_id.hpp"
 
@@ -63,6 +66,23 @@ class Sample {
 
     /// Returns the [`UniquePublisherId`] of the [`Publisher`](crate::port::publisher::Publisher)
     auto origin() const -> UniquePublisherId;
+
+    /// Requests that this [`Sample`] be forwarded onto the target
+    /// publish-subscribe service identified by `target`, without
+    /// releasing the subscriber's own borrow.
+    ///
+    /// `target` must be declared in the source service's `forwards_into`
+    /// list. The R9 invariant (at-most-once per Sample handle per
+    /// target) is enforced subscriber-side; a second `forward_to` to
+    /// the same target on the same Sample returns
+    /// [`ForwardError::AlreadyForwarded`].
+    auto forward_to(ServiceNameView target) const -> iox2::bb::Expected<void, ForwardError>;
+
+    /// Consumes this [`Sample`], releasing the subscriber's borrow AND
+    /// forwarding the bucket onto the named target service in a single
+    /// fused operation. On failure, the natural Drop runs (releasing
+    /// the borrow as a plain Drop).
+    auto drop_and_forward_to(ServiceNameView target) && -> iox2::bb::Expected<void, ForwardError>;
 
   private:
     template <ServiceType, typename, typename>
@@ -155,6 +175,49 @@ inline auto Sample<S, Payload, UserHeader>::header() const -> HeaderPublishSubsc
 template <ServiceType S, typename Payload, typename UserHeader>
 inline auto Sample<S, Payload, UserHeader>::origin() const -> UniquePublisherId {
     return header().publisher_id();
+}
+
+namespace internal {
+inline auto translate_forward_error(int rc) noexcept -> ForwardError {
+    switch (static_cast<iox2_forward_error_e>(rc)) {
+    case iox2_forward_error_e_TARGET_NOT_DECLARED:
+        return ForwardError::TargetNotDeclared;
+    case iox2_forward_error_e_ALREADY_FORWARDED:
+        return ForwardError::AlreadyForwarded;
+    case iox2_forward_error_e_COMPLETION_QUEUE_FULL:
+        return ForwardError::CompletionQueueFull;
+    case iox2_forward_error_e_PUBLISHER_UNAVAILABLE:
+        return ForwardError::PublisherUnavailable;
+    }
+    // Unknown / future error code: fall back to a generic transient
+    // condition.
+    return ForwardError::CompletionQueueFull;
+}
+} // namespace internal
+
+template <ServiceType S, typename Payload, typename UserHeader>
+inline auto Sample<S, Payload, UserHeader>::forward_to(ServiceNameView target) const
+    -> iox2::bb::Expected<void, ForwardError> {
+    const auto rc = iox2_sample_forward_to(&m_handle, target.m_ptr);
+    if (rc == IOX2_OK) {
+        return {};
+    }
+    return iox2::bb::err(internal::translate_forward_error(rc));
+}
+
+template <ServiceType S, typename Payload, typename UserHeader>
+inline auto Sample<S, Payload, UserHeader>::drop_and_forward_to(ServiceNameView target) && ->
+    iox2::bb::Expected<void, ForwardError> {
+    const auto rc = iox2_sample_drop_and_forward_to(m_handle, target.m_ptr);
+    // The C FFI consumed the handle (success path) or it ran the
+    // natural Drop (failure path). In both cases the handle is no
+    // longer valid here; null it so the C++ destructor doesn't try
+    // to double-drop.
+    m_handle = nullptr;
+    if (rc == IOX2_OK) {
+        return {};
+    }
+    return iox2::bb::err(internal::translate_forward_error(rc));
 }
 
 } // namespace iox2

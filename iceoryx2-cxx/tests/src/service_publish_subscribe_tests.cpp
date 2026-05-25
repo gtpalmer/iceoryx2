@@ -1715,4 +1715,102 @@ TYPED_TEST(ServicePublishSubscribeTest, only_max_subscribers_can_be_created) {
     auto sut = service.subscriber_builder().create();
     ASSERT_TRUE(sut.has_value());
 }
+
+// ----------------------------------------------------------------------
+// Publish-subscribe forwarding (Milestone 5b – C++ wrapper coverage)
+// ----------------------------------------------------------------------
+
+TYPED_TEST(ServicePublishSubscribeTest, native_only_publisher_mode_persists) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+
+    const auto service_name = iox2_testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service = node.service_builder(service_name)
+                       .template publish_subscribe<uint64_t>()
+                       .publisher_mode(PublisherMode::NativeOnly)
+                       .create()
+                       .value();
+
+    // Opening the same service requesting Mixed should fail because
+    // the stored mode is NativeOnly.
+    auto reopen = node.service_builder(service_name)
+                      .template publish_subscribe<uint64_t>()
+                      .publisher_mode(PublisherMode::Mixed)
+                      .open();
+    ASSERT_FALSE(reopen.has_value());
+    ASSERT_EQ(reopen.error(), PublishSubscribeOpenError::IncompatiblePublisherMode);
+}
+
+TYPED_TEST(ServicePublishSubscribeTest, forwards_into_and_accepts_forwarders_from_round_trip) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+
+    const auto source_name = iox2_testing::generate_service_name();
+    const auto target_name = iox2_testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+
+    std::vector<ServiceName> targets;
+    targets.push_back(target_name);
+    std::vector<ServiceName> sources;
+    sources.push_back(source_name);
+
+    auto target = node.service_builder(target_name)
+                      .template publish_subscribe<uint64_t>()
+                      .accepts_forwarders_from(std::move(sources))
+                      .publisher_mode(PublisherMode::ForwarderOnly)
+                      .create();
+    ASSERT_TRUE(target.has_value());
+
+    auto source = node.service_builder(source_name)
+                      .template publish_subscribe<uint64_t>()
+                      .forwards_into(std::move(targets))
+                      .create();
+    ASSERT_TRUE(source.has_value());
+
+    // Subscriber on source forwards a sample onto target.
+    auto publisher = source.value().publisher_builder().create().value();
+    auto source_subscriber = source.value().subscriber_builder().create().value();
+    auto target_subscriber = target.value().subscriber_builder().create().value();
+
+    ASSERT_TRUE(publisher.send_copy(uint64_t { 42 }).has_value());
+
+    auto received_source = source_subscriber.receive().value();
+    ASSERT_TRUE(received_source.has_value());
+    const auto forward_result = received_source->forward_to(target_name.as_view());
+    ASSERT_TRUE(forward_result.has_value());
+
+    // Drive the publisher's retrieve-and-dispatch by another loan.
+    auto trigger = publisher.loan();
+    ASSERT_TRUE(trigger.has_value());
+    (void) trigger;
+
+    auto received_target = target_subscriber.receive().value();
+    ASSERT_TRUE(received_target.has_value());
+    ASSERT_EQ(received_target->payload(), 42);
+}
+
+TYPED_TEST(ServicePublishSubscribeTest, forward_to_undeclared_target_returns_target_not_declared) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+
+    const auto service_name = iox2_testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service = node.service_builder(service_name).template publish_subscribe<uint64_t>().create().value();
+
+    auto publisher = service.publisher_builder().create().value();
+    auto subscriber = service.subscriber_builder().create().value();
+
+    ASSERT_TRUE(publisher.send_copy(uint64_t { 7 }).has_value());
+    auto received = subscriber.receive().value();
+    ASSERT_TRUE(received.has_value());
+
+    // This service did not declare `forwards_into`; any target is
+    // un-authorized.
+    const auto unrelated_target = iox2_testing::generate_service_name();
+    const auto result = received->forward_to(unrelated_target.as_view());
+    ASSERT_FALSE(result.has_value());
+    ASSERT_EQ(result.error(), ForwardError::TargetNotDeclared);
+}
+
 } // namespace

@@ -32,6 +32,20 @@ enum class PublisherCreateError : uint8_t {
     /// Caused by a failure when instantiating a [`ArcSyncPolicy`] defined in the
     /// [`Service`] as `ArcThreadSafetyPolicy`.
     FailedToDeployThreadsafetyPolicy,
+    /// The [`Service`] was created with
+    /// [`PublisherMode::ForwarderOnly`], which rejects native publishers.
+    NativePublisherRejectedByForwarderOnlyService,
+    /// A target service declared in `forwards_into` could not be opened
+    /// (it does not exist, has incompatible types, or has incompatible
+    /// attributes).
+    ForwardingTargetServiceUnavailable,
+    /// A target service declared in `forwards_into` does not list this
+    /// publisher's source service in its `accepts_forwarders_from`.
+    ForwardingTargetRejectsSourceService,
+    /// A target service declared in `forwards_into` has reached its
+    /// `max_publishers` limit and cannot accept this publisher's
+    /// forwarder participation.
+    ForwardingTargetExceedsMaxPublishers,
 };
 } // namespace iox2
 

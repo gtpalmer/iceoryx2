@@ -15,6 +15,8 @@
 
 #include "iox2/allocation_strategy.hpp"
 #include "iox2/attribute_error.hpp"
+#include "iox2/publisher_mode.hpp"
+#include "iox2/sample_forward_error.hpp"
 #include "iox2/bb/detail/assertions.hpp"
 #include "iox2/bb/into.hpp"
 #include "iox2/bb/semantic_string.hpp"
@@ -642,6 +644,37 @@ constexpr auto from<int, iox2::PublishSubscribeOpenOrCreateError>(const int valu
         return iox2::PublishSubscribeOpenOrCreateError::CreateOldConnectionsStillActive;
     case iox2_pub_sub_open_or_create_error_e_SYSTEM_IN_FLUX:
         return iox2::PublishSubscribeOpenOrCreateError::SystemInFlux;
+
+    case iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_PUBLISHER_MODE:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenIncompatiblePublisherMode;
+    case iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_FORWARDS_INTO:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenIncompatibleForwardsInto;
+    case iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_ACCEPTS_FORWARDERS_FROM:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenIncompatibleAcceptsForwardersFrom;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_EXCEEDS_CAPACITY:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenForwardingTargetsExceedsCapacity;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_DUPLICATE:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenForwardingTargetsContainsDuplicate;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_SELF:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenForwardingTargetsContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_O_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenAcceptsForwardersFromContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_O_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenNativeOnlyCannotAcceptForwarders;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO:
+        return iox2::PublishSubscribeOpenOrCreateError::OpenForwarderOnlyCannotHaveForwardsInto;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_EXCEEDS_CAPACITY:
+        return iox2::PublishSubscribeOpenOrCreateError::CreateForwardingTargetsExceedsCapacity;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_DUPLICATE:
+        return iox2::PublishSubscribeOpenOrCreateError::CreateForwardingTargetsContainsDuplicate;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_SELF:
+        return iox2::PublishSubscribeOpenOrCreateError::CreateForwardingTargetsContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_C_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF:
+        return iox2::PublishSubscribeOpenOrCreateError::CreateAcceptsForwardersFromContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_C_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS:
+        return iox2::PublishSubscribeOpenOrCreateError::CreateNativeOnlyCannotAcceptForwarders;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO:
+        return iox2::PublishSubscribeOpenOrCreateError::CreateForwarderOnlyCannotHaveForwardsInto;
     }
 
     IOX2_UNREACHABLE();
@@ -685,6 +718,24 @@ constexpr auto from<int, iox2::PublishSubscribeOpenError>(const int value) noexc
         return iox2::PublishSubscribeOpenError::ExceedsMaxNumberOfNodes;
     case iox2_pub_sub_open_or_create_error_e_O_IS_MARKED_FOR_DESTRUCTION:
         return iox2::PublishSubscribeOpenError::IsMarkedForDestruction;
+    case iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_PUBLISHER_MODE:
+        return iox2::PublishSubscribeOpenError::IncompatiblePublisherMode;
+    case iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_FORWARDS_INTO:
+        return iox2::PublishSubscribeOpenError::IncompatibleForwardsInto;
+    case iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_ACCEPTS_FORWARDERS_FROM:
+        return iox2::PublishSubscribeOpenError::IncompatibleAcceptsForwardersFrom;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_EXCEEDS_CAPACITY:
+        return iox2::PublishSubscribeOpenError::ForwardingTargetsExceedsCapacity;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_DUPLICATE:
+        return iox2::PublishSubscribeOpenError::ForwardingTargetsContainsDuplicate;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_SELF:
+        return iox2::PublishSubscribeOpenError::ForwardingTargetsContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_O_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF:
+        return iox2::PublishSubscribeOpenError::AcceptsForwardersFromContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_O_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS:
+        return iox2::PublishSubscribeOpenError::NativeOnlyCannotAcceptForwarders;
+    case iox2_pub_sub_open_or_create_error_e_O_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO:
+        return iox2::PublishSubscribeOpenError::ForwarderOnlyCannotHaveForwardsInto;
     default:
         // we should avoid using default but this is here necessary since it is only a
         // partial translation, only the open errors are handled
@@ -730,6 +781,24 @@ constexpr auto from<iox2::PublishSubscribeOpenError, iox2_pub_sub_open_or_create
         return iox2_pub_sub_open_or_create_error_e_O_EXCEEDS_MAX_NUMBER_OF_NODES;
     case iox2::PublishSubscribeOpenError::IsMarkedForDestruction:
         return iox2_pub_sub_open_or_create_error_e_O_IS_MARKED_FOR_DESTRUCTION;
+    case iox2::PublishSubscribeOpenError::IncompatiblePublisherMode:
+        return iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_PUBLISHER_MODE;
+    case iox2::PublishSubscribeOpenError::IncompatibleForwardsInto:
+        return iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_FORWARDS_INTO;
+    case iox2::PublishSubscribeOpenError::IncompatibleAcceptsForwardersFrom:
+        return iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_ACCEPTS_FORWARDERS_FROM;
+    case iox2::PublishSubscribeOpenError::ForwardingTargetsExceedsCapacity:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_EXCEEDS_CAPACITY;
+    case iox2::PublishSubscribeOpenError::ForwardingTargetsContainsDuplicate:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_DUPLICATE;
+    case iox2::PublishSubscribeOpenError::ForwardingTargetsContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_SELF;
+    case iox2::PublishSubscribeOpenError::AcceptsForwardersFromContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_O_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF;
+    case iox2::PublishSubscribeOpenError::NativeOnlyCannotAcceptForwarders:
+        return iox2_pub_sub_open_or_create_error_e_O_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS;
+    case iox2::PublishSubscribeOpenError::ForwarderOnlyCannotHaveForwardsInto:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO;
     }
 
     IOX2_UNREACHABLE();
@@ -760,6 +829,18 @@ constexpr auto from<int, iox2::PublishSubscribeCreateError>(const int value) noe
         return iox2::PublishSubscribeCreateError::IsBeingCreatedByAnotherInstance;
     case iox2_pub_sub_open_or_create_error_e_C_HANGS_IN_CREATION:
         return iox2::PublishSubscribeCreateError::HangsInCreation;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_EXCEEDS_CAPACITY:
+        return iox2::PublishSubscribeCreateError::ForwardingTargetsExceedsCapacity;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_DUPLICATE:
+        return iox2::PublishSubscribeCreateError::ForwardingTargetsContainsDuplicate;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_SELF:
+        return iox2::PublishSubscribeCreateError::ForwardingTargetsContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_C_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF:
+        return iox2::PublishSubscribeCreateError::AcceptsForwardersFromContainsSelf;
+    case iox2_pub_sub_open_or_create_error_e_C_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS:
+        return iox2::PublishSubscribeCreateError::NativeOnlyCannotAcceptForwarders;
+    case iox2_pub_sub_open_or_create_error_e_C_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO:
+        return iox2::PublishSubscribeCreateError::ForwarderOnlyCannotHaveForwardsInto;
     default:
         // we should avoid using default but this is here necessary since it is only a
         // partial translation, only the create errors are handled
@@ -785,6 +866,18 @@ constexpr auto from<iox2::PublishSubscribeCreateError, iox2_pub_sub_open_or_crea
         return iox2_pub_sub_open_or_create_error_e_C_IS_BEING_CREATED_BY_ANOTHER_INSTANCE;
     case iox2::PublishSubscribeCreateError::HangsInCreation:
         return iox2_pub_sub_open_or_create_error_e_C_HANGS_IN_CREATION;
+    case iox2::PublishSubscribeCreateError::ForwardingTargetsExceedsCapacity:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_EXCEEDS_CAPACITY;
+    case iox2::PublishSubscribeCreateError::ForwardingTargetsContainsDuplicate:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_DUPLICATE;
+    case iox2::PublishSubscribeCreateError::ForwardingTargetsContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_SELF;
+    case iox2::PublishSubscribeCreateError::AcceptsForwardersFromContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_C_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF;
+    case iox2::PublishSubscribeCreateError::NativeOnlyCannotAcceptForwarders:
+        return iox2_pub_sub_open_or_create_error_e_C_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS;
+    case iox2::PublishSubscribeCreateError::ForwarderOnlyCannotHaveForwardsInto:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO;
     }
 
     IOX2_UNREACHABLE();
@@ -854,6 +947,36 @@ constexpr auto from<iox2::PublishSubscribeOpenOrCreateError, iox2_pub_sub_open_o
         return iox2_pub_sub_open_or_create_error_e_C_HANGS_IN_CREATION;
     case iox2::PublishSubscribeOpenOrCreateError::CreateOldConnectionsStillActive:
         return iox2_pub_sub_open_or_create_error_e_C_OLD_CONNECTION_STILL_ACTIVE;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenIncompatiblePublisherMode:
+        return iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_PUBLISHER_MODE;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenIncompatibleForwardsInto:
+        return iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_FORWARDS_INTO;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenIncompatibleAcceptsForwardersFrom:
+        return iox2_pub_sub_open_or_create_error_e_O_INCOMPATIBLE_ACCEPTS_FORWARDERS_FROM;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenForwardingTargetsExceedsCapacity:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_EXCEEDS_CAPACITY;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenForwardingTargetsContainsDuplicate:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_DUPLICATE;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenForwardingTargetsContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDING_TARGETS_CONTAINS_SELF;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenAcceptsForwardersFromContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_O_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenNativeOnlyCannotAcceptForwarders:
+        return iox2_pub_sub_open_or_create_error_e_O_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS;
+    case iox2::PublishSubscribeOpenOrCreateError::OpenForwarderOnlyCannotHaveForwardsInto:
+        return iox2_pub_sub_open_or_create_error_e_O_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO;
+    case iox2::PublishSubscribeOpenOrCreateError::CreateForwardingTargetsExceedsCapacity:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_EXCEEDS_CAPACITY;
+    case iox2::PublishSubscribeOpenOrCreateError::CreateForwardingTargetsContainsDuplicate:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_DUPLICATE;
+    case iox2::PublishSubscribeOpenOrCreateError::CreateForwardingTargetsContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDING_TARGETS_CONTAINS_SELF;
+    case iox2::PublishSubscribeOpenOrCreateError::CreateAcceptsForwardersFromContainsSelf:
+        return iox2_pub_sub_open_or_create_error_e_C_ACCEPTS_FORWARDERS_FROM_CONTAINS_SELF;
+    case iox2::PublishSubscribeOpenOrCreateError::CreateNativeOnlyCannotAcceptForwarders:
+        return iox2_pub_sub_open_or_create_error_e_C_NATIVE_ONLY_CANNOT_ACCEPT_FORWARDERS;
+    case iox2::PublishSubscribeOpenOrCreateError::CreateForwarderOnlyCannotHaveForwardsInto:
+        return iox2_pub_sub_open_or_create_error_e_C_FORWARDER_ONLY_CANNOT_HAVE_FORWARDS_INTO;
     }
 
     IOX2_UNREACHABLE();
@@ -1645,6 +1768,14 @@ constexpr auto from<int, iox2::PublisherCreateError>(const int value) noexcept -
         return iox2::PublisherCreateError::UnableToCreateDataSegment;
     case iox2_publisher_create_error_e_FAILED_TO_DEPLOY_THREAD_SAFETY_POLICY:
         return iox2::PublisherCreateError::FailedToDeployThreadsafetyPolicy;
+    case iox2_publisher_create_error_e_NATIVE_PUBLISHER_REJECTED_BY_FORWARDER_ONLY_SERVICE:
+        return iox2::PublisherCreateError::NativePublisherRejectedByForwarderOnlyService;
+    case iox2_publisher_create_error_e_FORWARDING_TARGET_SERVICE_UNAVAILABLE:
+        return iox2::PublisherCreateError::ForwardingTargetServiceUnavailable;
+    case iox2_publisher_create_error_e_FORWARDING_TARGET_REJECTS_SOURCE_SERVICE:
+        return iox2::PublisherCreateError::ForwardingTargetRejectsSourceService;
+    case iox2_publisher_create_error_e_FORWARDING_TARGET_EXCEEDS_MAX_PUBLISHERS:
+        return iox2::PublisherCreateError::ForwardingTargetExceedsMaxPublishers;
     }
 
     IOX2_UNREACHABLE();
@@ -1661,6 +1792,14 @@ from<iox2::PublisherCreateError, iox2_publisher_create_error_e>(const iox2::Publ
         return iox2_publisher_create_error_e_UNABLE_TO_CREATE_DATA_SEGMENT;
     case iox2::PublisherCreateError::FailedToDeployThreadsafetyPolicy:
         return iox2_publisher_create_error_e_FAILED_TO_DEPLOY_THREAD_SAFETY_POLICY;
+    case iox2::PublisherCreateError::NativePublisherRejectedByForwarderOnlyService:
+        return iox2_publisher_create_error_e_NATIVE_PUBLISHER_REJECTED_BY_FORWARDER_ONLY_SERVICE;
+    case iox2::PublisherCreateError::ForwardingTargetServiceUnavailable:
+        return iox2_publisher_create_error_e_FORWARDING_TARGET_SERVICE_UNAVAILABLE;
+    case iox2::PublisherCreateError::ForwardingTargetRejectsSourceService:
+        return iox2_publisher_create_error_e_FORWARDING_TARGET_REJECTS_SOURCE_SERVICE;
+    case iox2::PublisherCreateError::ForwardingTargetExceedsMaxPublishers:
+        return iox2_publisher_create_error_e_FORWARDING_TARGET_EXCEEDS_MAX_PUBLISHERS;
     }
 
     IOX2_UNREACHABLE();
@@ -2392,6 +2531,75 @@ from<iox2::UnableToDeliverAction, iox2_unable_to_deliver_action_e>(const iox2::U
     }
 
     IOX2_UNREACHABLE();
+}
+
+template <>
+constexpr auto from<iox2::PublisherMode, iox2_publisher_mode_e>(const iox2::PublisherMode value) noexcept
+    -> iox2_publisher_mode_e {
+    switch (value) {
+    case iox2::PublisherMode::Mixed:
+        return iox2_publisher_mode_e_MIXED;
+    case iox2::PublisherMode::NativeOnly:
+        return iox2_publisher_mode_e_NATIVE_ONLY;
+    case iox2::PublisherMode::ForwarderOnly:
+        return iox2_publisher_mode_e_FORWARDER_ONLY;
+    }
+
+    IOX2_UNREACHABLE();
+}
+
+template <>
+constexpr auto from<iox2_publisher_mode_e, iox2::PublisherMode>(const iox2_publisher_mode_e value) noexcept
+    -> iox2::PublisherMode {
+    switch (value) {
+    case iox2_publisher_mode_e_MIXED:
+        return iox2::PublisherMode::Mixed;
+    case iox2_publisher_mode_e_NATIVE_ONLY:
+        return iox2::PublisherMode::NativeOnly;
+    case iox2_publisher_mode_e_FORWARDER_ONLY:
+        return iox2::PublisherMode::ForwarderOnly;
+    }
+
+    IOX2_UNREACHABLE();
+}
+
+template <>
+constexpr auto from<int, iox2::ForwardError>(const int value) noexcept -> iox2::ForwardError {
+    const auto error = static_cast<iox2_forward_error_e>(value);
+    switch (error) {
+    case iox2_forward_error_e_TARGET_NOT_DECLARED:
+        return iox2::ForwardError::TargetNotDeclared;
+    case iox2_forward_error_e_ALREADY_FORWARDED:
+        return iox2::ForwardError::AlreadyForwarded;
+    case iox2_forward_error_e_COMPLETION_QUEUE_FULL:
+        return iox2::ForwardError::CompletionQueueFull;
+    case iox2_forward_error_e_PUBLISHER_UNAVAILABLE:
+        return iox2::ForwardError::PublisherUnavailable;
+    }
+
+    IOX2_UNREACHABLE();
+}
+
+template <>
+constexpr auto from<iox2::ForwardError, iox2_forward_error_e>(const iox2::ForwardError value) noexcept
+    -> iox2_forward_error_e {
+    switch (value) {
+    case iox2::ForwardError::TargetNotDeclared:
+        return iox2_forward_error_e_TARGET_NOT_DECLARED;
+    case iox2::ForwardError::AlreadyForwarded:
+        return iox2_forward_error_e_ALREADY_FORWARDED;
+    case iox2::ForwardError::CompletionQueueFull:
+        return iox2_forward_error_e_COMPLETION_QUEUE_FULL;
+    case iox2::ForwardError::PublisherUnavailable:
+        return iox2_forward_error_e_PUBLISHER_UNAVAILABLE;
+    }
+
+    IOX2_UNREACHABLE();
+}
+
+template <>
+inline auto from<iox2::ForwardError, const char*>(const iox2::ForwardError value) noexcept -> const char* {
+    return iox2_forward_error_string(iox2::bb::into<iox2_forward_error_e>(value));
 }
 
 } // namespace bb

@@ -67,6 +67,33 @@ enum class PublishSubscribeOpenError : uint8_t {
     /// [`Service`] should be
     /// recreatable.
     IsMarkedForDestruction,
+    /// The [`Service`]'s stored `publisher_mode` does not match the
+    /// requested one.
+    IncompatiblePublisherMode,
+    /// The [`Service`]'s stored `forwards_into` list does not match the
+    /// requested one.
+    IncompatibleForwardsInto,
+    /// The [`Service`]'s stored `accepts_forwarders_from` list does not
+    /// match the requested one.
+    IncompatibleAcceptsForwardersFrom,
+    /// The requested `forwards_into` list exceeds the maximum
+    /// supported number of forwarding targets per service.
+    ForwardingTargetsExceedsCapacity,
+    /// The requested `forwards_into` (or `accepts_forwarders_from`) list
+    /// contains a duplicate entry.
+    ForwardingTargetsContainsDuplicate,
+    /// The requested `forwards_into` list contains this service's own
+    /// name.
+    ForwardingTargetsContainsSelf,
+    /// The requested `accepts_forwarders_from` list contains this
+    /// service's own name.
+    AcceptsForwardersFromContainsSelf,
+    /// The requested `publisher_mode` is [`PublisherMode::NativeOnly`]
+    /// while the `accepts_forwarders_from` list is non-empty.
+    NativeOnlyCannotAcceptForwarders,
+    /// The requested `publisher_mode` is [`PublisherMode::ForwarderOnly`]
+    /// while the `forwards_into` list is non-empty.
+    ForwarderOnlyCannotHaveForwardsInto,
 };
 
 /// Errors that can occur when a new [`MessagingPattern::PublishSubscribe`] [`Service`] shall be created.
@@ -92,6 +119,24 @@ enum class PublishSubscribeCreateError : uint8_t {
     /// initialized. Can be caused
     /// by a process that crashed during [`Service`] creation.
     HangsInCreation,
+    /// The requested `forwards_into` list exceeds the maximum
+    /// supported number of forwarding targets per service.
+    ForwardingTargetsExceedsCapacity,
+    /// The requested `forwards_into` (or `accepts_forwarders_from`) list
+    /// contains a duplicate entry.
+    ForwardingTargetsContainsDuplicate,
+    /// The requested `forwards_into` list contains this service's own
+    /// name.
+    ForwardingTargetsContainsSelf,
+    /// The requested `accepts_forwarders_from` list contains this
+    /// service's own name.
+    AcceptsForwardersFromContainsSelf,
+    /// The requested `publisher_mode` is [`PublisherMode::NativeOnly`]
+    /// while the `accepts_forwarders_from` list is non-empty.
+    NativeOnlyCannotAcceptForwarders,
+    /// The requested `publisher_mode` is [`PublisherMode::ForwarderOnly`]
+    /// while the `forwards_into` list is non-empty.
+    ForwarderOnlyCannotHaveForwardsInto,
 };
 
 /// Errors that can occur when a [`MessagingPattern::PublishSubscribe`] [`Service`] shall be
@@ -177,6 +222,48 @@ enum class PublishSubscribeOpenOrCreateError : uint8_t {
     /// Can occur when another process creates and removes the same [`Service`] repeatedly with a
     /// high frequency.
     SystemInFlux,
+    /// The [`Service`]'s stored `publisher_mode` does not match the
+    /// requested one (open path).
+    OpenIncompatiblePublisherMode,
+    /// The [`Service`]'s stored `forwards_into` list does not match the
+    /// requested one (open path).
+    OpenIncompatibleForwardsInto,
+    /// The [`Service`]'s stored `accepts_forwarders_from` list does not
+    /// match the requested one (open path).
+    OpenIncompatibleAcceptsForwardersFrom,
+    /// The requested `forwards_into` list exceeds capacity (open path).
+    OpenForwardingTargetsExceedsCapacity,
+    /// The requested `forwards_into`/`accepts_forwarders_from` list
+    /// contains a duplicate entry (open path).
+    OpenForwardingTargetsContainsDuplicate,
+    /// The requested `forwards_into` list contains this service's own
+    /// name (open path).
+    OpenForwardingTargetsContainsSelf,
+    /// The requested `accepts_forwarders_from` list contains this
+    /// service's own name (open path).
+    OpenAcceptsForwardersFromContainsSelf,
+    /// The requested `publisher_mode` is [`PublisherMode::NativeOnly`]
+    /// while the `accepts_forwarders_from` list is non-empty (open path).
+    OpenNativeOnlyCannotAcceptForwarders,
+    /// The requested `publisher_mode` is [`PublisherMode::ForwarderOnly`]
+    /// while the `forwards_into` list is non-empty (open path).
+    OpenForwarderOnlyCannotHaveForwardsInto,
+    /// `forwards_into` list exceeds capacity (create path).
+    CreateForwardingTargetsExceedsCapacity,
+    /// `forwards_into` / `accepts_forwarders_from` contains a duplicate
+    /// entry (create path).
+    CreateForwardingTargetsContainsDuplicate,
+    /// `forwards_into` contains this service's own name (create path).
+    CreateForwardingTargetsContainsSelf,
+    /// `accepts_forwarders_from` contains this service's own name
+    /// (create path).
+    CreateAcceptsForwardersFromContainsSelf,
+    /// `publisher_mode` is [`PublisherMode::NativeOnly`] while
+    /// `accepts_forwarders_from` is non-empty (create path).
+    CreateNativeOnlyCannotAcceptForwarders,
+    /// `publisher_mode` is [`PublisherMode::ForwarderOnly`] while
+    /// `forwards_into` is non-empty (create path).
+    CreateForwarderOnlyCannotHaveForwardsInto,
 };
 
 } // namespace iox2

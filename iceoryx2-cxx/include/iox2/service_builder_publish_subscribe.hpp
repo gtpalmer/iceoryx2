@@ -18,12 +18,17 @@
 #include "iox2/bb/detail/builder.hpp"
 #include "iox2/bb/expected.hpp"
 #include "iox2/bb/layout.hpp"
+#include "iox2/bb/optional.hpp"
 #include "iox2/internal/iceoryx2.hpp"
 #include "iox2/internal/service_builder_internal.hpp"
 #include "iox2/payload_info.hpp"
 #include "iox2/port_factory_publish_subscribe.hpp"
+#include "iox2/publisher_mode.hpp"
 #include "iox2/service_builder_publish_subscribe_error.hpp"
+#include "iox2/service_name.hpp"
 #include "iox2/service_type.hpp"
+
+#include <vector>
 
 namespace iox2 {
 /// Builder to create new [`MessagingPattern::PublishSubscribe`] based [`Service`]s
@@ -102,6 +107,24 @@ class ServiceBuilderPublishSubscribe {
 #endif
 
   public:
+    /// Controls which kinds of publishers may attach to the [`Service`].
+    /// See [`PublisherMode`].
+    auto publisher_mode(PublisherMode value) && -> ServiceBuilderPublishSubscribe&&;
+
+    /// Declares the target services this publish-subscribe service may
+    /// forward into. Subscribers of this service can request that a
+    /// received [`Sample`] be re-emitted onto a declared target via
+    /// [`Sample::forward_to`] or [`Sample::drop_and_forward_to`].
+    ///
+    /// The list may contain at most 8 entries and must not contain
+    /// duplicates or this service's own name. Validity is checked at
+    /// service-creation time (via [`create`] / [`open_or_create`]).
+    auto forwards_into(std::vector<ServiceName> targets) && -> ServiceBuilderPublishSubscribe&&;
+
+    /// Declares the source services this publish-subscribe service
+    /// accepts forwarded buckets from. Symmetric to [`forwards_into`].
+    auto accepts_forwarders_from(std::vector<ServiceName> sources) && -> ServiceBuilderPublishSubscribe&&;
+
     /// Sets the user header type of the [`Service`].
     template <typename NewHeader>
     auto user_header() && -> ServiceBuilderPublishSubscribe<Payload, NewHeader, S>&&;
@@ -143,6 +166,10 @@ class ServiceBuilderPublishSubscribe {
     void set_parameters();
 
     iox2_service_builder_pub_sub_h m_handle = nullptr;
+
+    iox2::bb::Optional<PublisherMode> m_publisher_mode;
+    iox2::bb::Optional<std::vector<ServiceName>> m_forwards_into;
+    iox2::bb::Optional<std::vector<ServiceName>> m_accepts_forwarders_from;
 };
 
 template <typename Payload, typename UserHeader, ServiceType S>
@@ -177,6 +204,44 @@ inline void ServiceBuilderPublishSubscribe<Payload, UserHeader, S>::set_paramete
     }
     if (m_max_nodes.has_value()) {
         iox2_service_builder_pub_sub_set_max_nodes(&m_handle, m_max_nodes.value());
+    }
+    if (m_publisher_mode.has_value()) {
+        iox2_publisher_mode_e c_mode = iox2_publisher_mode_e_MIXED;
+        switch (m_publisher_mode.value()) {
+        case PublisherMode::Mixed:
+            c_mode = iox2_publisher_mode_e_MIXED;
+            break;
+        case PublisherMode::NativeOnly:
+            c_mode = iox2_publisher_mode_e_NATIVE_ONLY;
+            break;
+        case PublisherMode::ForwarderOnly:
+            c_mode = iox2_publisher_mode_e_FORWARDER_ONLY;
+            break;
+        }
+        iox2_service_builder_pub_sub_set_publisher_mode(&m_handle, c_mode);
+    }
+    if (m_forwards_into.has_value()) {
+        std::vector<iox2_service_name_ptr> ptrs;
+        ptrs.reserve(m_forwards_into.value().size());
+        for (const auto& name : m_forwards_into.value()) {
+            ptrs.push_back(name.as_view().m_ptr);
+        }
+        const auto rc = iox2_service_builder_pub_sub_set_forwards_into(&m_handle, ptrs.data(), ptrs.size());
+        if (rc != IOX2_OK) {
+            IOX2_PANIC("This should never happen! forwards_into received a null entry.");
+        }
+    }
+    if (m_accepts_forwarders_from.has_value()) {
+        std::vector<iox2_service_name_ptr> ptrs;
+        ptrs.reserve(m_accepts_forwarders_from.value().size());
+        for (const auto& name : m_accepts_forwarders_from.value()) {
+            ptrs.push_back(name.as_view().m_ptr);
+        }
+        const auto rc =
+            iox2_service_builder_pub_sub_set_accepts_forwarders_from(&m_handle, ptrs.data(), ptrs.size());
+        if (rc != IOX2_OK) {
+            IOX2_PANIC("This should never happen! accepts_forwarders_from received a null entry.");
+        }
     }
 
     using ValueType = typename PayloadInfo<Payload>::ValueType;
@@ -324,6 +389,28 @@ inline auto ServiceBuilderPublishSubscribe<Payload, UserHeader, S>::create_with_
 
     return bb::err(bb::into<PublishSubscribeCreateError>(result));
 }
+
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPublishSubscribe<Payload, UserHeader, S>::publisher_mode(PublisherMode value) && ->
+    ServiceBuilderPublishSubscribe&& {
+    m_publisher_mode = iox2::bb::Optional<PublisherMode>(value);
+    return std::move(*this);
+}
+
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPublishSubscribe<Payload, UserHeader, S>::forwards_into(
+    std::vector<ServiceName> targets) && -> ServiceBuilderPublishSubscribe&& {
+    m_forwards_into = iox2::bb::Optional<std::vector<ServiceName>>(std::move(targets));
+    return std::move(*this);
+}
+
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPublishSubscribe<Payload, UserHeader, S>::accepts_forwarders_from(
+    std::vector<ServiceName> sources) && -> ServiceBuilderPublishSubscribe&& {
+    m_accepts_forwarders_from = iox2::bb::Optional<std::vector<ServiceName>>(std::move(sources));
+    return std::move(*this);
+}
+
 } // namespace iox2
 
 #endif
