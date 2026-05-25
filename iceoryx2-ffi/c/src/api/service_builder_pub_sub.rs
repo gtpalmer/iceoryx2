@@ -20,6 +20,7 @@ use crate::api::{
 };
 use crate::create_type_details;
 
+use iceoryx2::port::publisher_mode::PublisherMode;
 use iceoryx2::prelude::*;
 use iceoryx2::service::builder::publish_subscribe::{
     Builder, PublishSubscribeCreateError, PublishSubscribeOpenError,
@@ -803,6 +804,76 @@ pub unsafe extern "C" fn iox2_service_builder_pub_sub_set_enable_safe_overflow(
                 let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
                 service_builder_struct.set(ServiceBuilderUnion::new_local_pub_sub(
                     service_builder.enable_safe_overflow(value),
+                ));
+            }
+        }
+    }
+}
+
+/// Controls which kinds of publishers may attach to a publish-subscribe
+/// service. See [`PublisherMode`](iceoryx2::port::publisher_mode::PublisherMode)
+/// for the full semantics. C mirror of the Rust enum.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub enum iox2_publisher_mode_e {
+    /// Both native publishers and publishers participating as
+    /// forwarders from other services are permitted. Default.
+    MIXED = 0,
+    /// Only native publishers are permitted.
+    NATIVE_ONLY = 1,
+    /// Only forwarding participations from other services are
+    /// permitted.
+    FORWARDER_ONLY = 2,
+}
+
+impl From<iox2_publisher_mode_e> for PublisherMode {
+    fn from(value: iox2_publisher_mode_e) -> Self {
+        match value {
+            iox2_publisher_mode_e::MIXED => PublisherMode::Mixed,
+            iox2_publisher_mode_e::NATIVE_ONLY => PublisherMode::NativeOnly,
+            iox2_publisher_mode_e::FORWARDER_ONLY => PublisherMode::ForwarderOnly,
+        }
+    }
+}
+
+/// Sets the publisher mode for the publish-subscribe service builder.
+///
+/// # Arguments
+///
+/// * `service_builder_handle` - Must be a valid [`iox2_service_builder_pub_sub_h_ref`]
+///   obtained by [`iox2_service_builder_pub_sub`](crate::iox2_service_builder_pub_sub).
+/// * `value` - The publisher mode to set (see [`iox2_publisher_mode_e`]).
+///
+/// # Safety
+///
+/// * `service_builder_handle` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_service_builder_pub_sub_set_publisher_mode(
+    service_builder_handle: iox2_service_builder_pub_sub_h_ref,
+    value: iox2_publisher_mode_e,
+) {
+    service_builder_handle.assert_non_null();
+    unsafe {
+        let service_builder_struct = &mut *service_builder_handle.as_type();
+        let mode: PublisherMode = value.into();
+
+        match service_builder_struct.service_type {
+            iox2_service_type_e::IPC => {
+                let service_builder =
+                    ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+
+                let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
+                service_builder_struct.set(ServiceBuilderUnion::new_ipc_pub_sub(
+                    service_builder.publisher_mode(mode),
+                ));
+            }
+            iox2_service_type_e::LOCAL => {
+                let service_builder =
+                    ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+
+                let service_builder = ManuallyDrop::into_inner(service_builder.pub_sub);
+                service_builder_struct.set(ServiceBuilderUnion::new_local_pub_sub(
+                    service_builder.publisher_mode(mode),
                 ));
             }
         }

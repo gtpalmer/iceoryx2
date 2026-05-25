@@ -13,16 +13,63 @@
 #![allow(non_camel_case_types)]
 
 use crate::api::{
-    AssertNonNullHandle, HandleToType, PayloadFfi, UserHeaderFfi, c_size_t,
-    iox2_publish_subscribe_header_h, iox2_publish_subscribe_header_t, iox2_service_type_e,
+    AssertNonNullHandle, HandleToType, IOX2_OK, PayloadFfi, UserHeaderFfi, c_size_t,
+    iox2_publish_subscribe_header_h, iox2_publish_subscribe_header_t, iox2_service_name_ptr,
+    iox2_service_type_e,
 };
 
-use iceoryx2::sample::Sample;
+use iceoryx2::sample::{ForwardError, Sample};
 use iceoryx2_bb_elementary::static_assert::*;
-use iceoryx2_ffi_macros::iceoryx2_ffi;
+use iceoryx2_bb_elementary_traits::AsCStr;
+use iceoryx2_ffi_macros::{CStrRepr, iceoryx2_ffi};
 
-use core::ffi::c_void;
+use core::ffi::{c_char, c_int, c_void};
 use core::mem::ManuallyDrop;
+
+/// C mirror of [`ForwardError`] for the sample-forwarding APIs.
+#[repr(C)]
+#[derive(Copy, Clone, CStrRepr)]
+pub enum iox2_forward_error_e {
+    /// The named target service is not present in the source service's
+    /// `forwards_into` list.
+    #[CStr = "target not declared"]
+    TARGET_NOT_DECLARED = IOX2_OK as isize + 1,
+    /// The sample has already been forwarded to that target (R9
+    /// at-most-once invariant).
+    #[CStr = "already forwarded"]
+    ALREADY_FORWARDED,
+    /// The publisher's completion queue (where Forward / DropAndForward
+    /// signals flow) is full. Retry later.
+    #[CStr = "completion queue full"]
+    COMPLETION_QUEUE_FULL,
+    /// The connection back to the publisher is no longer valid.
+    #[CStr = "publisher unavailable"]
+    PUBLISHER_UNAVAILABLE,
+}
+
+impl From<ForwardError> for iox2_forward_error_e {
+    fn from(value: ForwardError) -> Self {
+        match value {
+            ForwardError::TargetNotDeclared => Self::TARGET_NOT_DECLARED,
+            ForwardError::AlreadyForwarded => Self::ALREADY_FORWARDED,
+            ForwardError::CompletionQueueFull => Self::COMPLETION_QUEUE_FULL,
+            ForwardError::PublisherUnavailable => Self::PUBLISHER_UNAVAILABLE,
+        }
+    }
+}
+
+/// Returns the static C-string representation of an
+/// [`iox2_forward_error_e`].
+///
+/// # Safety
+///
+/// * `value` must be a valid variant of [`iox2_forward_error_e`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_forward_error_string(
+    value: iox2_forward_error_e,
+) -> *const c_char {
+    value.as_const_cstr().as_ptr() as *const c_char
+}
 
 // BEGIN types definition
 
@@ -245,6 +292,104 @@ pub unsafe extern "C" fn iox2_sample_payload(
             *number_of_elements =
                 sample.value.as_mut().local.header().number_of_elements() as c_size_t;
         }
+    }
+}
+
+/// Forward this sample onto the publish-subscribe service identified by
+/// `target_name`, without releasing the subscriber's borrow.
+///
+/// `target_name` must appear in the source service's declared
+/// `forwards_into` list. R9 (at-most-once per Sample handle per target)
+/// is enforced via a subscriber-process-local bitmap on this handle.
+///
+/// # Arguments
+///
+/// * `sample_handle` - A valid non-owning sample handle. The sample is
+///   *not* consumed.
+/// * `target_name` - The target service name as a
+///   [`iox2_service_name_ptr`].
+///
+/// Returns `IOX2_OK` on success, or an [`iox2_forward_error_e`] value
+/// (cast to `c_int`) on failure.
+///
+/// # Safety
+///
+/// * `sample_handle` must be a valid handle.
+/// * `target_name` must be a valid pointer to an existing service name.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_sample_forward_to(
+    sample_handle: iox2_sample_h_ref,
+    target_name: iox2_service_name_ptr,
+) -> c_int {
+    sample_handle.assert_non_null();
+    debug_assert!(!target_name.is_null());
+
+    let target = unsafe { &*target_name };
+
+    unsafe {
+        let sample = &mut *sample_handle.as_type();
+        let result = match sample.service_type {
+            iox2_service_type_e::IPC => sample.value.as_mut().ipc.forward_to(target),
+            iox2_service_type_e::LOCAL => sample.value.as_mut().local.forward_to(target),
+        };
+        match result {
+            Ok(()) => IOX2_OK,
+            Err(e) => iox2_forward_error_e::from(e) as c_int,
+        }
+    }
+}
+
+/// Consume this sample, releasing the subscriber's borrow AND
+/// forwarding the bucket onto the named target service in a single
+/// fused operation. The sample handle is invalidated regardless of
+/// whether the forward portion succeeds; on failure, the natural Drop
+/// path runs and the subscriber's borrow is released as a plain Drop
+/// (no fanout to the target).
+///
+/// # Arguments
+///
+/// * `sample_handle` - An owning sample handle. After this call the
+///   handle is invalid.
+/// * `target_name` - The target service name.
+///
+/// Returns `IOX2_OK` on success, or an [`iox2_forward_error_e`] value
+/// (cast to `c_int`) on failure (sample is still consumed).
+///
+/// # Safety
+///
+/// * `sample_handle` must be a valid owning handle and is consumed by
+///   this call; it must not be used in any further function call.
+/// * `target_name` must be a valid pointer to an existing service name.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_sample_drop_and_forward_to(
+    sample_handle: iox2_sample_h,
+    target_name: iox2_service_name_ptr,
+) -> c_int {
+    debug_assert!(!sample_handle.is_null());
+    debug_assert!(!target_name.is_null());
+
+    let target = unsafe { &*target_name };
+
+    unsafe {
+        let sample = &mut *sample_handle.as_type();
+        let result_code = match sample.service_type {
+            iox2_service_type_e::IPC => {
+                let typed = ManuallyDrop::take(&mut sample.value.as_mut().ipc);
+                match typed.drop_and_forward_to(target) {
+                    Ok(()) => IOX2_OK,
+                    Err(e) => iox2_forward_error_e::from(e) as c_int,
+                }
+            }
+            iox2_service_type_e::LOCAL => {
+                let typed = ManuallyDrop::take(&mut sample.value.as_mut().local);
+                match typed.drop_and_forward_to(target) {
+                    Ok(()) => IOX2_OK,
+                    Err(e) => iox2_forward_error_e::from(e) as c_int,
+                }
+            }
+        };
+        (sample.deleter)(sample);
+        result_code
     }
 }
 
