@@ -336,7 +336,11 @@ impl<Service: service::Service> PublisherSharedState<Service> {
             }
 
             // Drop any connection slot that wasn't tagged in this sweep
-            // (subscriber detached).
+            // (target subscriber detached, possibly via crash). Before
+            // tearing down the connection, reclaim any chunks still in
+            // the connection's `used_chunk_list` — those are forwarded
+            // samples the target subscriber never released back. Each
+            // one decrements the source publisher's refcount.
             for slot in target.connections.iter() {
                 let needs_remove = {
                     let conn = unsafe { (*slot.get()).as_ref() };
@@ -346,6 +350,14 @@ impl<Service: service::Service> PublisherSharedState<Service> {
                     }
                 };
                 if needs_remove {
+                    if let Some(connection) = unsafe { (*slot.get()).as_ref() } {
+                        unsafe {
+                            <Service::Connection as iceoryx2_cal::zero_copy_connection::ZeroCopyConnection>::
+                                Sender::acquire_used_offsets(&connection.sender, |offset| {
+                                    self.sender.release_sample(offset)
+                                })
+                        };
+                    }
                     unsafe { *slot.get() = None };
                 }
             }
