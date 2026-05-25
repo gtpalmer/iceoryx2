@@ -411,6 +411,7 @@ impl<Service: service::Service, Payload: Debug + ZeroCopySend, UserHeader: Debug
                     chunk.payload.cast(),
                 )
             },
+            forwarding_history: core::cell::Cell::new(0),
         }))
     }
 }
@@ -440,6 +441,7 @@ impl<Service: service::Service, Payload: Debug + ZeroCopySend, UserHeader: Debug
                         ),
                     )
                 },
+                forwarding_history: core::cell::Cell::new(0),
             }
         }))
     }
@@ -477,6 +479,7 @@ impl<Service: service::Service, UserHeader: Debug + ZeroCopySend>
                         core::ptr::slice_from_raw_parts(chunk.payload.cast(), number_of_bytes),
                     )
                 },
+                forwarding_history: core::cell::Cell::new(0),
             }
         }))
     }

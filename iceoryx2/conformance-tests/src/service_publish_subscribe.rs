@@ -4388,4 +4388,205 @@ pub mod service_publish_subscribe {
         assert_that!(source.dynamic_config().number_of_publishers(), eq 1);
         assert_that!(unrelated.dynamic_config().number_of_publishers(), eq 0);
     }
+
+    // -----------------------------------------------------------------
+    // Publish-subscribe forwarding (Milestone 3b: Sample API skeleton)
+    // -----------------------------------------------------------------
+
+    #[conformance_test]
+    pub fn forward_to_returns_target_not_declared_for_unknown_target<Sut: Service>() {
+        use iceoryx2::sample::ForwardError;
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let unrelated: ServiceName = "fwd/unrelated_target_m3b".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let subscriber = source.subscriber_builder().create().unwrap();
+        publisher.send_copy(123u64).unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+
+        let result = sample.forward_to(&unrelated);
+        assert_that!(result, eq Err(ForwardError::TargetNotDeclared));
+    }
+
+    #[conformance_test]
+    pub fn forward_to_returns_not_yet_implemented_for_declared_target<Sut: Service>() {
+        // M3b: structural checks pass; runtime dispatch is M3e.
+        use iceoryx2::sample::ForwardError;
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let subscriber = source.subscriber_builder().create().unwrap();
+        publisher.send_copy(123u64).unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+
+        let result = sample.forward_to(&target_name);
+        assert_that!(
+            result,
+            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+        );
+    }
+
+    #[conformance_test]
+    pub fn forward_to_enforces_r9_at_most_once_per_target<Sut: Service>() {
+        use iceoryx2::sample::ForwardError;
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let subscriber = source.subscriber_builder().create().unwrap();
+        publisher.send_copy(123u64).unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+
+        // First call: structural checks pass; R9 bit is set; M3e
+        // dispatch is unimplemented.
+        let first = sample.forward_to(&target_name);
+        assert_that!(
+            first,
+            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+        );
+
+        // Second call to the same target on the same Sample handle:
+        // R9 detects the duplicate before the unimplemented dispatch
+        // path is reached.
+        let second = sample.forward_to(&target_name);
+        assert_that!(second, eq Err(ForwardError::AlreadyForwarded));
+    }
+
+    #[conformance_test]
+    pub fn drop_and_forward_to_consumes_sample_and_returns_not_yet_implemented<Sut: Service>() {
+        use iceoryx2::sample::ForwardError;
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let subscriber = source.subscriber_builder().create().unwrap();
+        publisher.send_copy(123u64).unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+
+        // drop_and_forward_to consumes the sample. The sample's Drop runs
+        // implicitly when the function returns / the value goes out of
+        // scope, so the subscriber's borrow is released — matching the
+        // eventual M3e semantics for the drop portion. The forward
+        // portion currently returns the sentinel.
+        let result = sample.drop_and_forward_to(&target_name);
+        assert_that!(
+            result,
+            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+        );
+    }
+
+    #[conformance_test]
+    pub fn forward_to_different_targets_on_same_sample_passes_r9<Sut: Service>() {
+        // R9 is per-(Sample, target). Forwarding the same Sample to two
+        // different targets is allowed.
+        use iceoryx2::sample::ForwardError;
+        let source_name = generate_service_name();
+        let target_a = generate_service_name();
+        let target_b = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_a, target_b])
+            .create()
+            .unwrap();
+        let _ta = node
+            .service_builder(&target_a)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+        let _tb = node
+            .service_builder(&target_b)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let subscriber = source.subscriber_builder().create().unwrap();
+        publisher.send_copy(123u64).unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+
+        let r_a = sample.forward_to(&target_a);
+        let r_b = sample.forward_to(&target_b);
+        assert_that!(
+            r_a,
+            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+        );
+        assert_that!(
+            r_b,
+            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+        );
+    }
 }
