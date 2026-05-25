@@ -630,9 +630,17 @@ pub mod details {
             let storage = fail!(from self, when self.create_or_open_shm(State::Sender),
             "{} since the corresponding connection could not be created or opened", msg);
 
+            let wide_entry_next_index = {
+                let mut v = vec![];
+                for _ in 0..self.number_of_channels {
+                    v.push(UnsafeCell::new(0usize));
+                }
+                v
+            };
             Ok(Sender {
                 storage,
                 name: self.name,
+                wide_entry_next_index,
             })
         }
 
@@ -654,6 +662,13 @@ pub mod details {
                     borrow_counter
                 },
                 name: self.name,
+                wide_entry_next_index: {
+                    let mut v = vec![];
+                    for _ in 0..self.number_of_channels {
+                        v.push(UnsafeCell::new(0usize));
+                    }
+                    v
+                },
             })
         }
     }
@@ -662,6 +677,12 @@ pub mod details {
     pub struct Sender<Storage: DynamicStorage<SharedManagementData>> {
         storage: Storage,
         name: FileName,
+        /// Per-channel "next sidetable index" counters, tracking the
+        /// publisher-process-local position into the wide-entry
+        /// sidetable. Advanced by one on each successful `reclaim()`.
+        /// Unused (capacity 0) when the connection has no sidetable.
+        /// See the publish-subscribe forwarding design doc.
+        wide_entry_next_index: Vec<UnsafeCell<usize>>,
     }
 
     impl<Storage: DynamicStorage<SharedManagementData>> Abandonable for Sender<Storage> {
@@ -872,9 +893,28 @@ pub mod details {
             let msg = "Unable to reclaim sample";
 
             let storage = self.storage.get();
-            match unsafe { storage.channels[channel_id.value()].completion_queue.pop() } {
+            let channel = &storage.channels[channel_id.value()];
+            let sidetable_capacity = channel.wide_entry_sidetable.capacity();
+            match unsafe { channel.completion_queue.pop() } {
                 None => Ok(None),
                 Some(v) => {
+                    // If the connection has a sidetable, the matching
+                    // `CompletionEntry` lives at our current
+                    // next-index. Advance the index now so it stays
+                    // in lockstep with the queue's head. M3e will read
+                    // the entry's tag/target_index here for variant
+                    // dispatch; for M3c-iv we just advance the index
+                    // — `Drop` is the only variant in flight.
+                    if sidetable_capacity > 0 {
+                        let next_index_cell =
+                            unsafe { &mut *self.wide_entry_next_index[channel_id.value()].get() };
+                        // Read the sidetable slot for side-effect /
+                        // future-use; result is discarded for now.
+                        let _entry = unsafe {
+                            channel.wide_entry_sidetable.read(*next_index_cell)
+                        };
+                        *next_index_cell = next_index_cell.wrapping_add(1);
+                    }
                     let pointer_offset = PointerOffset::from_value(v);
                     let segment_id = pointer_offset.segment_id().value() as usize;
 
@@ -956,6 +996,12 @@ pub mod details {
         storage: Storage,
         borrow_counter: Vec<UnsafeCell<usize>>,
         name: FileName,
+        /// Per-channel "next sidetable index" counters, tracking the
+        /// subscriber-process-local position into the wide-entry
+        /// sidetable. Advanced by one on each successful `release()`.
+        /// Unused (capacity 0) when the connection has no sidetable.
+        /// See the publish-subscribe forwarding design doc.
+        wide_entry_next_index: Vec<UnsafeCell<usize>>,
     }
 
     impl<Storage: DynamicStorage<SharedManagementData>> Abandonable for Receiver<Storage> {
@@ -1063,13 +1109,38 @@ pub mod details {
         ) -> Result<(), ZeroCopyReleaseError> {
             debug_assert!(channel_id.value() < self.storage.get().channels.capacity());
 
+            // If the connection has a wide-entry sidetable, write a
+            // default `CompletionEntry::Drop` into the slot at the
+            // current next-index BEFORE pushing to the queue. The
+            // queue's release/acquire on its tail counter then makes
+            // the sidetable write visible to the publisher when the
+            // publisher's reclaim sees the pop. M3e will replace the
+            // default with the real variant for `Forward` /
+            // `DropAndForward` operations via a separate API.
+            let channel = &self.storage.get().channels[channel_id.value()];
+            let sidetable_capacity = channel.wide_entry_sidetable.capacity();
+            let next_index_cell = unsafe { &mut *self.wide_entry_next_index[channel_id.value()].get() };
+            if sidetable_capacity > 0 {
+                let entry = crate::zero_copy_connection::completion_entry::CompletionEntry {
+                    tag: crate::zero_copy_connection::completion_entry::CompletionEntryTag::Drop,
+                    target_index: 0,
+                    offset: ptr.as_value(),
+                };
+                unsafe {
+                    channel.wide_entry_sidetable.write(*next_index_cell, entry);
+                };
+            }
+
             match unsafe {
-                self.storage.get().channels[channel_id.value()]
+                channel
                     .completion_queue
                     .push(ptr.as_value())
             } {
                 true => {
                     *self.borrow_counter(channel_id) -= 1;
+                    if sidetable_capacity > 0 {
+                        *next_index_cell = next_index_cell.wrapping_add(1);
+                    }
                     Ok(())
                 }
                 false => {

@@ -4542,6 +4542,60 @@ pub mod service_publish_subscribe {
     }
 
     #[conformance_test]
+    pub fn drop_round_trips_through_sidetable_on_forwarding_enabled_service<Sut: Service>() {
+        // Regression: when the source service has declared `forwards_into`,
+        // every per-(publisher, subscriber) connection allocates the
+        // wide-entry sidetable. `Sample::drop` writes a default
+        // `CompletionEntry::Drop` into the sidetable and pushes the
+        // offset onto the completion queue; the publisher's bookkeeping
+        // sweep reads the sidetable slot in lockstep. This verifies the
+        // round-trip works end-to-end with multiple pub/recv/drop
+        // cycles, which exercises the wraparound of the next-index
+        // counters at both ends.
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::Mixed)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let subscriber = source.subscriber_builder().create().unwrap();
+
+        // Round-trip 32 messages — more than the default queue capacity
+        // so the sidetable's next-index wraps around at least once.
+        for n in 0..32u64 {
+            publisher.send_copy(n).unwrap();
+            let sample = subscriber.receive().unwrap();
+            assert_that!(sample.is_some(), eq true);
+            let sample = sample.unwrap();
+            assert_that!(*sample, eq n);
+            // Sample drops at end of scope; the drop path writes
+            // CompletionEntry::Drop into the sidetable, then pushes the
+            // offset onto the completion queue. The publisher's next
+            // send / drop reclaim must continue to function correctly.
+        }
+
+        // Sanity: still able to send and receive after the round-trip.
+        publisher.send_copy(9999u64).unwrap();
+        let final_sample = subscriber.receive().unwrap();
+        assert_that!(final_sample.is_some(), eq true);
+        assert_that!(*final_sample.unwrap(), eq 9999u64);
+    }
+
+    #[conformance_test]
     pub fn forward_to_different_targets_on_same_sample_passes_r9<Sut: Service>() {
         // R9 is per-(Sample, target). Forwarding the same Sample to two
         // different targets is allowed.
