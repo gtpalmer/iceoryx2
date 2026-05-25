@@ -97,7 +97,14 @@ See also [Language Bindings in README.md](README.md#language-bindings).
 * [x] Request Response Messaging Pattern
 * [x] Blackboard Messaging Pattern
 * [ ] Log messaging pattern
-* [ ] Pipeline Messaging Pattern
+* [x] Publish-Subscribe forwarding extension (subscriber-initiated
+      cross-service forwarding, source-governed, zero-copy). See
+      `doc/design-documents/publish-subscribe-forwarding.md`.
+* [ ] Pipeline Messaging Pattern (distinct from forwarding above —
+      pipeline is a separate end-to-end stage abstraction, whereas
+      forwarding is an extension of pub/sub that lets a subscriber
+      hand a sample off to subscribers of another declared target
+      service)
 * [ ] PubSub, ReqRes, Pipeline variant that works with copies (poor mans mixed
       criticality)
 * [ ] Zero-copy GPU communication with Cuda, NvSci, Vulkan
