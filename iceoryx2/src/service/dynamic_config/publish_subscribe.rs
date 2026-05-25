@@ -32,7 +32,7 @@ use iceoryx2_bb_memory::bump_allocator::BumpAllocator;
 use iceoryx2_log::{error, fatal_panic};
 
 use crate::{
-    identifiers::{UniqueNodeId, UniquePortId, UniquePublisherId, UniqueSubscriberId},
+    identifiers::{UniqueNodeId, UniquePortId, UniquePublisherId, UniqueServiceId, UniqueSubscriberId},
     port::details::data_segment::DataSegmentType,
 };
 
@@ -43,6 +43,31 @@ use super::PortCleanupAction;
 pub(crate) struct DynamicConfigSettings {
     pub number_of_subscribers: usize,
     pub number_of_publishers: usize,
+}
+
+/// Distinguishes how a [`Publisher`](crate::port::publisher::Publisher) is
+/// participating in a service.
+///
+/// See the publish-subscribe forwarding design document for the full model
+/// (`doc/design-documents/publish-subscribe-forwarding.md`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PublisherParticipation {
+    /// The publisher allocates buckets on this service via `loan()` and
+    /// sends them onto this service's subscribers. This is the only kind of
+    /// publisher in a pure (non-forwarding) pub/sub topology.
+    Native,
+    /// The publisher does not allocate buckets on this service. It is a
+    /// publisher of `source_service` and participates here only to relay
+    /// forwarded buckets when subscribers of `source_service` issue
+    /// `Forward(this service)` operations. The runtime forwarding path is
+    /// landed in a later milestone; M2 only establishes the discovery and
+    /// segment-mapping infrastructure.
+    Forwarder {
+        /// Identifier of the source service whose buckets this publisher
+        /// relays into the current service.
+        source_service: UniqueServiceId,
+    },
 }
 
 /// Contains the communication settings of the connected
@@ -67,6 +92,10 @@ pub struct PublisherDetails {
     /// [`DataSegmentType::Dynamic`] it defines how many segment the
     /// [`Publisher`](crate::port::publisher::Publisher) can have at most.
     pub max_number_of_segments: u8,
+    /// Indicates whether the [`Publisher`](crate::port::publisher::Publisher)
+    /// is a native publisher of this service or a forwarder relaying buckets
+    /// from another source service.
+    pub participation: PublisherParticipation,
 }
 
 /// Contains the communication settings of the connected

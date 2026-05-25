@@ -131,6 +131,7 @@ use crate::port::details::sender::*;
 use crate::port::update_connections::{ConnectionFailure, UpdateConnections};
 use crate::prelude::UnableToDeliverStrategy;
 use crate::raw_sample::RawSampleMut;
+use crate::service::service_name::ServiceName;
 use crate::sample_mut::SampleMut;
 use crate::sample_mut_uninit::SampleMutUninit;
 use crate::service::builder::{CustomHeaderMarker, CustomPayloadMarker};
@@ -165,6 +166,18 @@ pub enum PublisherCreateError {
     /// which rejects native publishers. Only forwarding participations from
     /// other services are permitted.
     NativePublisherRejectedByForwarderOnlyService,
+    /// A target service declared in `forwards_into` could not be opened (it
+    /// either does not exist, has an incompatible payload/user-header type,
+    /// or has incompatible attributes).
+    ForwardingTargetServiceUnavailable,
+    /// A target service declared in `forwards_into` does not list this
+    /// publisher's source service in its `accepts_forwarders_from`. The
+    /// forwarding edge is not authorized end-to-end.
+    ForwardingTargetRejectsSourceService,
+    /// A target service declared in `forwards_into` has reached its
+    /// `max_publishers` limit and cannot accept this publisher's forwarder
+    /// participation.
+    ForwardingTargetExceedsMaxPublishers,
 }
 
 impl core::fmt::Display for PublisherCreateError {
@@ -314,6 +327,32 @@ impl<Service: service::Service> PublisherSharedState<Service> {
     }
 }
 
+/// A registration of this publisher as a forwarder participant on a target
+/// service. Owns the target service's dynamic storage (to keep it alive)
+/// and the [`ContainerHandle`] used to deregister at drop time.
+struct ForwarderAttachment<Service: service::Service> {
+    dynamic_storage: Service::DynamicStorage<crate::service::dynamic_config::DynamicConfig>,
+    handle: ContainerHandle,
+    target_name: ServiceName,
+}
+
+impl<Service: service::Service> Drop for ForwarderAttachment<Service> {
+    fn drop(&mut self) {
+        self.dynamic_storage
+            .get()
+            .publish_subscribe()
+            .release_publisher_handle(self.handle);
+    }
+}
+
+impl<Service: service::Service> core::fmt::Debug for ForwarderAttachment<Service> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ForwarderAttachment")
+            .field("target_name", &self.target_name)
+            .finish()
+    }
+}
+
 /// Sending endpoint of a publish-subscriber based communication.
 #[derive(Debug)]
 pub struct Publisher<
@@ -324,6 +363,7 @@ pub struct Publisher<
     pub(crate) publisher_shared_state:
         Service::ArcThreadSafetyPolicy<PublisherSharedState<Service>>,
     dynamic_publisher_handle: Option<ContainerHandle>,
+    forwarder_attachments: Vec<ForwarderAttachment<Service>>,
     _payload: PhantomData<Payload>,
     _user_header: PhantomData<UserHeader>,
 }
@@ -448,6 +488,12 @@ impl<
             max_slice_len,
             node_id: *service.shared_node().id(),
             max_number_of_segments,
+            // This is a native publisher of its own service. The same details
+            // are reused (with `participation` overridden) when registering as
+            // a forwarder participant on each target service in
+            // `static_config.forwards_into`.
+            participation: crate::service::dynamic_config::publish_subscribe::
+                PublisherParticipation::Native,
         };
         let global_config = service.shared_node().config();
 
@@ -527,6 +573,7 @@ impl<
         let mut new_self = Self {
             publisher_shared_state,
             dynamic_publisher_handle: None,
+            forwarder_attachments: Vec::new(),
             _payload: PhantomData,
             _user_header: PhantomData,
         };
@@ -538,6 +585,73 @@ impl<
         {
             warn!(from new_self,
                 "The new Publisher port is unable to connect to every Subscriber port, caused by {:?}.", e);
+        }
+
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
+        // Attach to each declared forwarding target *before* registering on
+        // the source service. If any target attachment fails, the
+        // `forwarder_attachments` Vec is dropped on early return, releasing
+        // any partially-registered handles, and the source-service
+        // registration never happens — leaving the system clean.
+        let source_service_name = *service.static_config().name();
+        let source_service_id = service.static_config().unique_service_id();
+        let forwards_into = static_config.forwards_into;
+        let shared_node = service.shared_node().clone();
+        let forwarder_details = PublisherDetails {
+            participation:
+                crate::service::dynamic_config::publish_subscribe::PublisherParticipation::
+                    Forwarder {
+                        source_service: source_service_id,
+                    },
+            ..publisher_details
+        };
+        let source_message_type_details = static_config.message_type_details;
+        for target_name in forwards_into.iter() {
+            let (target_static, target_dynamic_storage) =
+                match crate::service::builder::open_target_service_for_forwarder_attach::<Service>(
+                    shared_node.clone(),
+                    target_name,
+                    &source_message_type_details,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fail!(from origin,
+                            with PublisherCreateError::ForwardingTargetServiceUnavailable,
+                            "{} since the forwarding target service {:?} could not be opened for forwarder attach ({:?}).",
+                            msg, target_name, e);
+                    }
+                };
+
+            if !target_static
+                .accepts_forwarders_from
+                .contains(&source_service_name)
+            {
+                fail!(from origin,
+                    with PublisherCreateError::ForwardingTargetRejectsSourceService,
+                    "{} since the forwarding target service {:?} does not list source service {:?} in its accepts_forwarders_from declaration.",
+                    msg, target_name, source_service_name);
+            }
+
+            let handle = match target_dynamic_storage
+                .get()
+                .publish_subscribe()
+                .add_publisher_id(forwarder_details)
+            {
+                Some(h) => h,
+                None => {
+                    fail!(from origin,
+                        with PublisherCreateError::ForwardingTargetExceedsMaxPublishers,
+                        "{} since the forwarding target service {:?} has reached its max_publishers limit and cannot accept this forwarder.",
+                        msg, target_name);
+                }
+            };
+
+            new_self.forwarder_attachments.push(ForwarderAttachment {
+                dynamic_storage: target_dynamic_storage,
+                handle,
+                target_name: *target_name,
+            });
         }
 
         core::sync::atomic::compiler_fence(Ordering::SeqCst);

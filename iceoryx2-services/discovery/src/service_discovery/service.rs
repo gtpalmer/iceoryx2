@@ -108,7 +108,10 @@ impl From<PublisherCreateError> for CreationError {
             }
             PublisherCreateError::UnableToCreateDataSegment
             | PublisherCreateError::FailedToDeployThreadsafetyPolicy
-            | PublisherCreateError::NativePublisherRejectedByForwarderOnlyService => {
+            | PublisherCreateError::NativePublisherRejectedByForwarderOnlyService
+            | PublisherCreateError::ForwardingTargetServiceUnavailable
+            | PublisherCreateError::ForwardingTargetRejectsSourceService
+            | PublisherCreateError::ForwardingTargetExceedsMaxPublishers => {
                 CreationError::PublisherCreationError
             }
         }

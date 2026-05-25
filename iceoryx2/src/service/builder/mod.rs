@@ -491,3 +491,116 @@ impl<ServiceType: service::Service> BuilderWithServiceType<ServiceType> {
         )
     }
 }
+
+/// Resources held to keep a forwarder-publisher registration alive on a
+/// target service. Dropping this releases the publisher handle on the
+/// target's dynamic config and closes the target's dynamic storage.
+#[doc(hidden)]
+pub struct ForwarderAttachmentResources<ServiceType: service::Service> {
+    /// The target service's dynamic storage. Must be kept alive for the
+    /// duration of the forwarder participation.
+    pub dynamic_storage: ServiceType::DynamicStorage<DynamicConfig>,
+    /// The handle returned by `add_publisher_id` on the target service's
+    /// publisher container. Released on drop via
+    /// `release_publisher_handle`.
+    pub handle: iceoryx2_bb_lock_free::mpmc::container::ContainerHandle,
+}
+
+/// Errors produced by [`open_target_service_for_forwarder_attach`].
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum ForwarderAttachOpenError {
+    /// The target service does not exist.
+    DoesNotExist,
+    /// The target service exists but its messaging pattern is not
+    /// [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe).
+    NotPublishSubscribe,
+    /// The target service's payload or user-header type details do not
+    /// match those of the source service.
+    IncompatibleTypeDetails,
+    /// The target service's underlying resources are missing, corrupted,
+    /// or inaccessible.
+    ServiceInCorruptedState,
+    /// The target service is marked for destruction.
+    IsMarkedForDestruction,
+    /// The target service is hanging in creation; the creation timeout
+    /// elapsed before it became available.
+    HangsInCreation,
+    /// Opening the target service's dynamic storage failed in an
+    /// unexpected way.
+    InternalFailure,
+}
+
+/// Opens a target publish-subscribe service for the purpose of attaching
+/// this node as a forwarder participant.
+///
+/// This is the cross-service open used by the publish-subscribe forwarding
+/// feature. It is intentionally non-generic over `Payload` and
+/// `UserHeader` so that it can be called from contexts where the source
+/// publisher's `Payload` may be `?Sized` (slice-payload services). The
+/// returned [`ForwarderAttachmentResources`] keeps the target's dynamic
+/// storage alive and provides the validated static config; the caller is
+/// responsible for adding the forwarder entry to the target's publisher
+/// container.
+#[doc(hidden)]
+pub(crate) fn open_target_service_for_forwarder_attach<ServiceType: service::Service>(
+    shared_node: SharedNode<ServiceType>,
+    target_name: &ServiceName,
+    expected_message_type_details:
+        &crate::service::static_config::message_type_details::MessageTypeDetails,
+) -> Result<
+    (
+        crate::service::static_config::publish_subscribe::StaticConfig,
+        ServiceType::DynamicStorage<DynamicConfig>,
+    ),
+    ForwarderAttachOpenError,
+> {
+    let msg = "Failed to open target service for forwarder attach";
+    let target_service_config = StaticConfig::new_publish_subscribe::<
+        ServiceType::ServiceNameHasher,
+    >(target_name, shared_node.config());
+    let builder_with_service_type =
+        BuilderWithServiceType::new(target_service_config, shared_node);
+
+    let (existing_config, _static_storage) = match builder_with_service_type
+        .is_service_available(msg)
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err(ForwarderAttachOpenError::DoesNotExist),
+        Err(ServiceState::IncompatibleMessagingPattern) => {
+            return Err(ForwarderAttachOpenError::NotPublishSubscribe);
+        }
+        Err(ServiceState::HangsInCreation) => {
+            return Err(ForwarderAttachOpenError::HangsInCreation);
+        }
+        Err(ServiceState::InsufficientPermissions)
+        | Err(ServiceState::Corrupted) => {
+            return Err(ForwarderAttachOpenError::ServiceInCorruptedState);
+        }
+    };
+
+    let pubsub_static = match &existing_config.messaging_pattern {
+        crate::service::static_config::messaging_pattern::MessagingPattern::PublishSubscribe(v) => *v,
+        _ => return Err(ForwarderAttachOpenError::NotPublishSubscribe),
+    };
+
+    if !pubsub_static
+        .message_type_details
+        .is_compatible_to(expected_message_type_details)
+    {
+        return Err(ForwarderAttachOpenError::IncompatibleTypeDetails);
+    }
+
+    let dynamic_storage = match builder_with_service_type.open_dynamic_config_storage() {
+        Ok(s) => s,
+        Err(OpenDynamicStorageFailure::IsMarkedForDestruction) => {
+            return Err(ForwarderAttachOpenError::IsMarkedForDestruction);
+        }
+        Err(OpenDynamicStorageFailure::ExceedsMaxNumberOfNodes) => {
+            return Err(ForwarderAttachOpenError::InternalFailure);
+        }
+        Err(_) => return Err(ForwarderAttachOpenError::ServiceInCorruptedState),
+    };
+
+    Ok((pubsub_static, dynamic_storage))
+}

@@ -99,6 +99,9 @@ pub enum iox2_publisher_create_error_e {
     UNABLE_TO_CREATE_DATA_SEGMENT,
     FAILED_TO_DEPLOY_THREAD_SAFETY_POLICY,
     NATIVE_PUBLISHER_REJECTED_BY_FORWARDER_ONLY_SERVICE,
+    FORWARDING_TARGET_SERVICE_UNAVAILABLE,
+    FORWARDING_TARGET_REJECTS_SOURCE_SERVICE,
+    FORWARDING_TARGET_EXCEEDS_MAX_PUBLISHERS,
 }
 
 impl IntoCInt for PublisherCreateError {
@@ -115,6 +118,15 @@ impl IntoCInt for PublisherCreateError {
             }
             PublisherCreateError::NativePublisherRejectedByForwarderOnlyService => {
                 iox2_publisher_create_error_e::NATIVE_PUBLISHER_REJECTED_BY_FORWARDER_ONLY_SERVICE
+            }
+            PublisherCreateError::ForwardingTargetServiceUnavailable => {
+                iox2_publisher_create_error_e::FORWARDING_TARGET_SERVICE_UNAVAILABLE
+            }
+            PublisherCreateError::ForwardingTargetRejectsSourceService => {
+                iox2_publisher_create_error_e::FORWARDING_TARGET_REJECTS_SOURCE_SERVICE
+            }
+            PublisherCreateError::ForwardingTargetExceedsMaxPublishers => {
+                iox2_publisher_create_error_e::FORWARDING_TARGET_EXCEEDS_MAX_PUBLISHERS
             }
         }) as c_int
     }

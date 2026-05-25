@@ -4227,4 +4227,165 @@ pub mod service_publish_subscribe {
             eq PublishSubscribeCreateError::ForwardingTargetsExceedsCapacity
         );
     }
+
+    // -----------------------------------------------------------------
+    // Publish-subscribe forwarding (Milestone 2: forwarder attachment)
+    // -----------------------------------------------------------------
+
+    #[conformance_test]
+    pub fn forwarder_attaches_to_target_service_at_publisher_create<Sut: Service>() {
+        use iceoryx2::service::dynamic_config::publish_subscribe::PublisherParticipation;
+
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        // Before creating the publisher: target has no publishers.
+        assert_that!(target.dynamic_config().number_of_publishers(), eq 0);
+
+        let _publisher = source.publisher_builder().create().unwrap();
+
+        // After creating the source publisher: target sees a single
+        // publisher whose participation is Forwarder with the source's
+        // service id.
+        assert_that!(target.dynamic_config().number_of_publishers(), eq 1);
+
+        let mut observed_participation: Option<PublisherParticipation> = None;
+        target.dynamic_config().list_publishers(|details| {
+            observed_participation = Some(details.participation);
+            CallbackProgression::Continue
+        });
+
+        assert_that!(
+            matches!(
+                observed_participation.unwrap(),
+                PublisherParticipation::Forwarder { .. }
+            ),
+            eq true
+        );
+    }
+
+    #[conformance_test]
+    pub fn forwarder_detaches_from_target_service_on_publisher_drop<Sut: Service>() {
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        assert_that!(target.dynamic_config().number_of_publishers(), eq 1);
+
+        drop(publisher);
+        assert_that!(target.dynamic_config().number_of_publishers(), eq 0);
+    }
+
+    #[conformance_test]
+    pub fn create_publisher_with_nonexistent_forwarding_target_fails<Sut: Service>() {
+        let source_name = generate_service_name();
+        let target_name: ServiceName = "fwd/nonexistent_target_for_m2".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+
+        let result = source.publisher_builder().create();
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublisherCreateError::ForwardingTargetServiceUnavailable
+        );
+        // Source service's own publisher list remains empty after the
+        // failure — the publisher was rolled back.
+        assert_that!(source.dynamic_config().number_of_publishers(), eq 0);
+    }
+
+    #[conformance_test]
+    pub fn create_publisher_when_target_does_not_accept_source_fails<Sut: Service>() {
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let other_source: ServiceName = "fwd/other_accepted_source".try_into().unwrap();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        // Target only accepts a different source service.
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![other_source])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let result = source.publisher_builder().create();
+        assert_that!(result.is_err(), eq true);
+        assert_that!(
+            result.err().unwrap(),
+            eq PublisherCreateError::ForwardingTargetRejectsSourceService
+        );
+    }
+
+    #[conformance_test]
+    pub fn publisher_without_forwards_into_does_not_attach_anywhere<Sut: Service>() {
+        // Sanity check: a publisher on a service with no `forwards_into`
+        // creates and drops without affecting any other service.
+        let source_name = generate_service_name();
+        let unrelated_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .create()
+            .unwrap();
+        let unrelated = node
+            .service_builder(&unrelated_name)
+            .publish_subscribe::<u64>()
+            .create()
+            .unwrap();
+
+        let _publisher = source.publisher_builder().create().unwrap();
+        assert_that!(source.dynamic_config().number_of_publishers(), eq 1);
+        assert_that!(unrelated.dynamic_config().number_of_publishers(), eq 0);
+    }
 }
