@@ -220,6 +220,15 @@ pub trait ZeroCopyConnectionBuilder<C: ZeroCopyConnection>: NamedConceptBuilder<
     fn number_of_samples_per_segment(self, value: usize) -> Self;
     fn number_of_channels(self, value: usize) -> Self;
     fn initial_channel_state(self, value: ChannelState) -> Self;
+    /// Sets the per-channel capacity of the wide-entry sidetable used
+    /// by the publish-subscribe forwarding feature. A value of `0`
+    /// (the default) disables the sidetable entirely — no backing
+    /// memory is bump-allocated. Non-zero allocates the sidetable
+    /// alongside each channel's completion queue; the iceoryx2 layer
+    /// sets this from the source service's `forwards_into`
+    /// declaration. See
+    /// `doc/design-documents/publish-subscribe-forwarding.md`.
+    fn wide_entry_sidetable_capacity_per_channel(self, value: usize) -> Self;
     /// The timeout defines how long the [`ZeroCopyConnectionBuilder`] should wait for
     /// concurrent
     /// [`ZeroCopyConnectionBuilder::create_sender()`] or

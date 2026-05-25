@@ -189,6 +189,16 @@ pub mod details {
                 fatal_panic!(from self,
                     "Memory already initialized. Initializing it twice may lead to undefined behavior.");
             }
+            // Capacity 0 marks a "disabled" sidetable — used on native
+            // connections where forwarding is not in play. There's no
+            // backing memory to allocate; mark the sidetable as
+            // initialized so subsequent `is_initialized()` checks pass,
+            // but no slots exist. Read/write must not be called on such
+            // a sidetable; callers gate by checking `capacity() > 0`.
+            if self.capacity == 0 {
+                self.is_memory_initialized.store(true, Ordering::Relaxed);
+                return Ok(());
+            }
             unsafe {
                 self.data_ptr.init(fail!(from self, when allocator
                     .allocate(Layout::from_size_align_unchecked(
@@ -222,8 +232,17 @@ pub mod details {
         /// Returns the amount of memory required to back a
         /// [`WideEntrySidetable`] of the given capacity. Excludes the
         /// size of the [`WideEntrySidetable`] struct itself.
+        ///
+        /// Returns `0` for `capacity == 0` (disabled sidetable). Native
+        /// pub/sub connections use this case to avoid paying any
+        /// bump-allocated memory cost for forwarding infrastructure
+        /// they don't use.
         pub const fn const_memory_size(capacity: usize) -> usize {
-            unaligned_mem_size::<UnsafeCell<CompletionEntry>>(capacity)
+            if capacity == 0 {
+                0
+            } else {
+                unaligned_mem_size::<UnsafeCell<CompletionEntry>>(capacity)
+            }
         }
 
         /// Returns the maximum number of slots this sidetable can hold.

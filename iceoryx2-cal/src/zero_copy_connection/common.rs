@@ -30,6 +30,7 @@ pub mod details {
         index_queue::RelocatableIndexQueue,
         safely_overflowing_index_queue::RelocatableSafelyOverflowingIndexQueue,
     };
+    use crate::zero_copy_connection::completion_entry::RelocatableWideEntrySidetable;
     use iceoryx2_bb_memory::bump_allocator::BumpAllocator;
     use iceoryx2_bb_posix::adaptive_wait::AdaptiveWaitBuilder;
     use iceoryx2_bb_posix::clock::Time;
@@ -167,10 +168,21 @@ pub mod details {
         state: AtomicU64,
         completion_queue: RelocatableIndexQueue,
         submission_queue: RelocatableSafelyOverflowingIndexQueue,
+        /// Wide-entry sidetable used by the publish-subscribe forwarding
+        /// feature to carry `CompletionEntry` variants alongside the
+        /// (unchanged) bare-`PointerOffset` completion queue. For
+        /// native connections (no `forwards_into` on the source service)
+        /// this is constructed with `capacity = 0` — no backing memory
+        /// is bump-allocated and read/write are never called.
+        wide_entry_sidetable: RelocatableWideEntrySidetable,
     }
 
     impl Channel {
-        fn new(submission_queue_capacity: usize, completion_queue_capacity: usize) -> Self {
+        fn new(
+            submission_queue_capacity: usize,
+            completion_queue_capacity: usize,
+            wide_entry_sidetable_capacity: usize,
+        ) -> Self {
             Self {
                 submission_queue: unsafe {
                     RelocatableSafelyOverflowingIndexQueue::new_uninit(submission_queue_capacity)
@@ -179,17 +191,22 @@ pub mod details {
                     RelocatableIndexQueue::new_uninit(completion_queue_capacity)
                 },
                 state: AtomicU64::new(CHANNEL_STATE_OPEN.0),
+                wide_entry_sidetable: unsafe {
+                    RelocatableWideEntrySidetable::new_uninit(wide_entry_sidetable_capacity)
+                },
             }
         }
 
         const fn const_memory_size(
             submission_queue_capacity: usize,
             completion_queue_capacity: usize,
+            wide_entry_sidetable_capacity: usize,
         ) -> usize {
             RelocatableIndexQueue::const_memory_size(completion_queue_capacity)
                 + RelocatableSafelyOverflowingIndexQueue::const_memory_size(
                     submission_queue_capacity,
                 )
+                + RelocatableWideEntrySidetable::const_memory_size(wide_entry_sidetable_capacity)
         }
 
         fn init(&mut self, allocator: &mut BumpAllocator) {
@@ -198,6 +215,8 @@ pub mod details {
                         "{} since the submission queue allocation failed. - This is an implementation bug!", msg);
             fatal_panic!(from self, when unsafe { self.completion_queue.init(allocator) },
                         "{} since the completion queue allocation failed. - This is an implementation bug!", msg);
+            fatal_panic!(from self, when unsafe { self.wide_entry_sidetable.init(allocator) },
+                        "{} since the wide-entry sidetable initialization failed. - This is an implementation bug!", msg);
         }
     }
 
@@ -306,13 +325,18 @@ pub mod details {
         const fn const_memory_size(
             submission_queue_capacity: usize,
             completion_queue_capacity: usize,
+            wide_entry_sidetable_capacity: usize,
             number_of_samples: usize,
             number_of_segments: u8,
             number_of_channels: usize,
         ) -> usize {
             let number_of_segments = number_of_segments as usize;
             number_of_channels
-                * Channel::const_memory_size(submission_queue_capacity, completion_queue_capacity)
+                * Channel::const_memory_size(
+                    submission_queue_capacity,
+                    completion_queue_capacity,
+                    wide_entry_sidetable_capacity,
+                )
                 + RelocatableVec::<Channel>::const_memory_size(number_of_channels)
                 + SegmentDetails::const_memory_size(number_of_samples)
                     * number_of_segments
@@ -327,6 +351,7 @@ pub mod details {
             allocator: &mut BumpAllocator,
             submission_queue_capacity: usize,
             completion_queue_capacity: usize,
+            wide_entry_sidetable_capacity: usize,
         ) {
             let msg = "Failed to initialize SharedManagementData";
             // initialize channels
@@ -337,6 +362,7 @@ pub mod details {
                     self.channels.push_unchecked(Channel::new(
                         submission_queue_capacity,
                         completion_queue_capacity,
+                        wide_entry_sidetable_capacity,
                     ))
                 };
                 self.channels[n].init(allocator);
@@ -374,6 +400,13 @@ pub mod details {
         number_of_samples_per_segment: usize,
         number_of_segments: u8,
         number_of_channels: usize,
+        /// Wide-entry sidetable capacity per channel. `0` disables the
+        /// sidetable entirely — used by native pub/sub connections
+        /// (services that have not declared `forwards_into`). Non-zero
+        /// allocates the sidetable alongside the completion queue at
+        /// connection creation. See
+        /// `doc/design-documents/publish-subscribe-forwarding.md`.
+        wide_entry_sidetable_capacity: usize,
         initial_channel_state: ChannelState,
         timeout: Duration,
         config: Configuration<Storage>,
@@ -395,6 +428,7 @@ pub mod details {
             let supplementary_size = SharedManagementData::const_memory_size(
                 self.submission_queue_size(),
                 self.completion_queue_size(),
+                self.wide_entry_sidetable_capacity,
                 self.number_of_samples_per_segment,
                 self.number_of_segments,
                 self.number_of_channels,
@@ -409,7 +443,7 @@ pub mod details {
         .supplementary_size(supplementary_size)
         .call_drop_on_destruction(false)
         .initializer(|data, allocator| {
-            unsafe { data.init(allocator, self.submission_queue_size(), self.completion_queue_size())};
+            unsafe { data.init(allocator, self.submission_queue_size(), self.completion_queue_size(), self.wide_entry_sidetable_capacity)};
             for channel in data.channels.iter() {
                 channel.state.store(self.initial_channel_state.0, Ordering::Relaxed);
             }
@@ -523,6 +557,11 @@ pub mod details {
                 number_of_samples_per_segment: DEFAULT_NUMBER_OF_SAMPLES_PER_SEGMENT,
                 number_of_segments: DEFAULT_MAX_SUPPORTED_SHARED_MEMORY_SEGMENTS,
                 number_of_channels: DEFAULT_NUMBER_OF_CHANNELS,
+                // Default to a disabled sidetable. Callers that need
+                // forwarding (the iceoryx2 layer, on services with
+                // non-empty `forwards_into`) explicitly opt in via
+                // `wide_entry_sidetable_capacity_per_channel(value)`.
+                wide_entry_sidetable_capacity: 0,
                 config: Configuration::default(),
                 initial_channel_state: CHANNEL_STATE_OPEN,
                 timeout: Duration::ZERO,
@@ -575,6 +614,11 @@ pub mod details {
 
         fn number_of_channels(mut self, value: usize) -> Self {
             self.number_of_channels = value.clamp(1, usize::MAX);
+            self
+        }
+
+        fn wide_entry_sidetable_capacity_per_channel(mut self, value: usize) -> Self {
+            self.wide_entry_sidetable_capacity = value;
             self
         }
 
