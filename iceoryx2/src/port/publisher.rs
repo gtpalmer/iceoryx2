@@ -552,6 +552,22 @@ impl<
                     message_type_details: static_config.message_type_details,
                     number_of_channels: 1,
                     initial_channel_state: CHANNEL_STATE_OPEN,
+                    // Enable the wide-entry sidetable on every
+                    // (publisher, subscriber) connection only when the
+                    // source service has declared forwarding targets.
+                    // The capacity matches the completion queue's
+                    // capacity (M1's static-sizing formula) so that
+                    // each queue slot has a corresponding sidetable
+                    // slot, and native services pay no bump-allocated
+                    // bytes.
+                    wide_entry_sidetable_capacity_per_channel:
+                        if static_config.forwards_into.is_empty() {
+                            0
+                        } else {
+                            static_config.subscriber_max_buffer_size
+                                + static_config.subscriber_max_borrowed_samples
+                                + 1
+                        },
                 },
                 config: *config,
                 subscriber_list_state: UnsafeCell::new(unsafe { subscriber_list.get_state() }),

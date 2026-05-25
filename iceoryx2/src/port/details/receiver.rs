@@ -104,6 +104,7 @@ impl<Service: service::Service> Connection<Service> {
                                     .number_of_channels(this.number_of_channels)
                                     .initial_channel_state(initial_channel_state)
                                     .max_supported_shared_memory_segments(max_number_of_segments)
+                                    .wide_entry_sidetable_capacity_per_channel(this.wide_entry_sidetable_capacity_per_channel)
                                     .timeout(global_config.global.creation_timeout)
                                     .create_receiver(),
                         "{} since the zero copy connection could not be established.", msg);
@@ -147,6 +148,17 @@ pub(crate) struct Receiver<Service: service::Service> {
     pub(crate) number_of_channels: usize,
     pub(crate) connection_storage: UnsafeCell<SlotMap<Connection<Service>>>,
     pub(crate) initial_channel_state: ChannelState,
+    /// Per-channel capacity of the wide-entry sidetable to allocate on
+    /// every connection created by this `Receiver`. `0` disables the
+    /// sidetable (native pub/sub). Non-zero is set when the service
+    /// this subscriber attached to has a non-empty `forwards_into`
+    /// declaration — that is the source service from whose perspective
+    /// completion-queue entries may carry `Forward` /
+    /// `DropAndForward` variants. The value matches the underlying
+    /// completion queue's capacity so that one sidetable slot exists
+    /// per queue slot. Both ends agree because both consult the same
+    /// static config.
+    pub(crate) wide_entry_sidetable_capacity_per_channel: usize,
 }
 
 impl<Service: service::Service> Abandonable for Receiver<Service> {

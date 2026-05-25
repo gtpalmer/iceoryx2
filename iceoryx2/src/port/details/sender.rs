@@ -105,6 +105,7 @@ impl<Service: service::Service> Connection<Service> {
                                 .max_supported_shared_memory_segments(this.max_number_of_segments)
                                 .initial_channel_state(initial_channel_state)
                                 .number_of_channels(this.number_of_channels)
+                                .wide_entry_sidetable_capacity_per_channel(this.wide_entry_sidetable_capacity_per_channel)
                                 .timeout(this.shared_node.config().global.creation_timeout)
                                 .create_sender(),
                         "{}.", msg);
@@ -139,6 +140,14 @@ pub(crate) struct Sender<Service: service::Service> {
     pub(crate) message_type_details: MessageTypeDetails,
     pub(crate) number_of_channels: usize,
     pub(crate) initial_channel_state: ChannelState,
+    /// Per-channel capacity of the wide-entry sidetable to allocate on
+    /// every connection created by this `Sender`. `0` disables the
+    /// sidetable (native pub/sub). Non-zero is set when the source
+    /// service has a non-empty `forwards_into` declaration. The value
+    /// matches the underlying completion queue's capacity so that one
+    /// sidetable slot exists per queue slot. See
+    /// `doc/design-documents/publish-subscribe-forwarding.md`.
+    pub(crate) wide_entry_sidetable_capacity_per_channel: usize,
 }
 
 impl<Service: service::Service> Abandonable for Sender<Service> {

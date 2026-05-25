@@ -471,6 +471,9 @@ impl<
             // one channel suffices
             number_of_channels: 1,
             initial_channel_state: CHANNEL_STATE_OPEN,
+            // Request-response clients do not use the publish-subscribe
+            // forwarding sidetable.
+            wide_entry_sidetable_capacity_per_channel: 0,
         };
 
         let number_of_to_be_removed_connections = service
@@ -506,6 +509,9 @@ impl<
             number_of_channels: number_of_requests,
             connection_storage: UnsafeCell::new(SlotMap::new(number_of_connections)),
             initial_channel_state: CHANNEL_STATE_CLOSED,
+            // Request-response clients do not use the publish-subscribe
+            // forwarding sidetable.
+            wide_entry_sidetable_capacity_per_channel: 0,
         };
 
         let client_shared_state = Service::ArcThreadSafetyPolicy::new(ClientSharedState {

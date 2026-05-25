@@ -247,6 +247,21 @@ impl<
                 number_of_channels: 1,
                 connection_storage: UnsafeCell::new(SlotMap::new(number_of_connections)),
                 initial_channel_state: CHANNEL_STATE_OPEN,
+                // Enable the wide-entry sidetable on every
+                // (publisher, subscriber) connection only when this
+                // subscriber's service has declared forwarding
+                // targets — i.e., subscribers of this service may
+                // issue `Forward` / `DropAndForward` operations
+                // through their completion queues. Capacity matches
+                // the completion queue (M1's static-sizing formula);
+                // native subscriber services pay no bump-allocated
+                // bytes.
+                wide_entry_sidetable_capacity_per_channel:
+                    if static_config.forwards_into.is_empty() {
+                        0
+                    } else {
+                        buffer_size + static_config.subscriber_max_borrowed_samples + 1
+                    },
             },
         });
 

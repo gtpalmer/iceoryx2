@@ -379,6 +379,9 @@ impl<
             number_of_channels: 1,
             connection_storage: UnsafeCell::new(SlotMap::new(number_of_connections)),
             initial_channel_state: CHANNEL_STATE_OPEN,
+            // Request-response servers do not use the publish-subscribe
+            // forwarding sidetable.
+            wide_entry_sidetable_capacity_per_channel: 0,
         };
 
         let global_config = service.shared_node().config();
@@ -445,6 +448,9 @@ impl<
             message_type_details: static_config.response_message_type_details,
             number_of_channels: number_of_requests_per_client,
             initial_channel_state: CHANNEL_STATE_CLOSED,
+            // Request-response servers do not use the publish-subscribe
+            // forwarding sidetable.
+            wide_entry_sidetable_capacity_per_channel: 0,
         };
 
         let shared_state = Service::ArcThreadSafetyPolicy::new(SharedServerState {
