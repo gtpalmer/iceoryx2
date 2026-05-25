@@ -48,11 +48,7 @@ use crate::service::service_name::ServiceName;
 /// [`Sample::drop_and_forward_to`].
 ///
 /// See `doc/design-documents/publish-subscribe-forwarding.md` for the
-/// full semantics. M3b lands the API surface and the structural checks
-/// (`TargetNotDeclared`, `AlreadyForwarded`) but defers the actual
-/// dispatch to M3e — until M3e, `ForwardingRuntimePathNotYetImplemented`
-/// is returned in place of pushing a `Forward` / `DropAndForward` entry
-/// onto the completion queue.
+/// full semantics.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum ForwardError {
     /// The named target service is not present in the source service's
@@ -63,9 +59,14 @@ pub enum ForwardError {
     /// target. R9 forbids forwarding the same Sample to the same target
     /// more than once.
     AlreadyForwarded,
-    /// Sentinel returned by M3b-style API skeletons until M3e wires up
-    /// the runtime forwarding path. After M3e this variant is removed.
-    ForwardingRuntimePathNotYetImplemented,
+    /// The publisher's completion queue (the channel through which the
+    /// subscriber signals Forward / DropAndForward to the publisher) is
+    /// full. Retry later — the publisher will eventually drain it.
+    CompletionQueueFull,
+    /// The connection back to the publisher is no longer valid (for
+    /// instance, the publisher dropped). The forward request cannot be
+    /// delivered.
+    PublisherUnavailable,
 }
 
 impl core::fmt::Display for ForwardError {
@@ -190,24 +191,42 @@ impl<
     /// bitmap on this handle: a second `forward_to` to the same target
     /// returns [`ForwardError::AlreadyForwarded`].
     ///
-    /// **M3b status**: this method returns
-    /// [`ForwardError::ForwardingRuntimePathNotYetImplemented`] once the
-    /// structural checks pass. The runtime forwarding path (push of a
-    /// `Forward` entry onto the publisher's completion queue, R10
-    /// deduplication, and dispatch onto target-service subscribers) is
-    /// landed in M3e. See the design doc.
+    /// On success, a `Forward(target_index)` entry is pushed onto the
+    /// publisher's completion queue via the wide-entry sidetable. The
+    /// publisher will, on its next sweep, consult the per-bucket
+    /// forwarding-history bitmap (R10) and — if this is the first
+    /// `Forward(target)` for the bucket — fan the offset out to each
+    /// subscriber of the target service.
     pub fn forward_to(&self, target: &ServiceName) -> Result<(), ForwardError> {
+        use iceoryx2_cal::zero_copy_connection::completion_entry::{
+            CompletionEntry, CompletionEntryTag,
+        };
+
         let target_index = self.resolve_target_index(target)?;
         let mask = 1u64 << target_index;
         let current = self.forwarding_history.get();
         if current & mask != 0 {
             return Err(ForwardError::AlreadyForwarded);
         }
+
+        let entry = CompletionEntry {
+            tag: CompletionEntryTag::Forward,
+            target_index,
+            offset: self.details.offset.as_value(),
+        };
+        let pushed = self.subscriber_shared_state.lock().receiver.
+            release_offset_with_entry(
+                &self.details,
+                ChannelId::new(0),
+                entry,
+            );
+        if !pushed {
+            return Err(ForwardError::CompletionQueueFull);
+        }
+        // R9 bit is set only after successful push, so that a failed
+        // push can be retried by the caller.
         self.forwarding_history.set(current | mask);
-        // M3e will replace this with the actual push of a `Forward`
-        // entry onto the completion queue once the wire format (M3c) and
-        // publisher dispatch (M3d, M3e) are in place.
-        Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+        Ok(())
     }
 
     /// Consumes this [`Sample`], releasing the subscriber's borrow on the
@@ -216,33 +235,55 @@ impl<
     ///
     /// The drop portion runs unconditionally — the `Sample` is consumed
     /// even when the forward portion fails. The returned `Result` reports
-    /// only whether the forward portion went through.
+    /// only whether the forward portion went through; in the failure
+    /// case the Sample's normal `Drop` path runs (releasing as a plain
+    /// `Drop` entry).
     ///
-    /// **M3b status**: same as [`forward_to`]; the structural checks
-    /// (target declared, R9 not already set) are performed and on success
-    /// the call returns
-    /// [`ForwardError::ForwardingRuntimePathNotYetImplemented`]. The
-    /// Sample is consumed regardless, so the normal `Drop` path runs and
-    /// the subscriber's borrow is released — matching the eventual M3e
-    /// semantics for the drop portion.
+    /// On success, a single fused `DropAndForward(target_index)` entry is
+    /// pushed onto the publisher's completion queue, and the Sample's
+    /// natural `Drop` is suppressed (so the publisher sees one entry, not
+    /// two).
     pub fn drop_and_forward_to(self, target: &ServiceName) -> Result<(), ForwardError> {
+        use iceoryx2_cal::zero_copy_connection::completion_entry::{
+            CompletionEntry, CompletionEntryTag,
+        };
+
         let target_index = match self.resolve_target_index(target) {
             Ok(i) => i,
             Err(e) => {
-                // Sample is consumed; Drop runs on function exit.
+                // Sample is consumed; Drop runs on function exit, which
+                // pushes a plain Drop entry (releases the borrow).
                 return Err(e);
             }
         };
         let mask = 1u64 << target_index;
         let current = self.forwarding_history.get();
         if current & mask != 0 {
+            // R9 forbids a second forward to the same target. Sample is
+            // still consumed — the natural Drop releases the borrow.
             return Err(ForwardError::AlreadyForwarded);
         }
-        self.forwarding_history.set(current | mask);
-        // M3e will replace this with the push of a `DropAndForward`
-        // entry. For now the Sample is consumed (Drop releases the
-        // borrow); only the forward portion is unimplemented.
-        Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
+
+        let entry = CompletionEntry {
+            tag: CompletionEntryTag::DropAndForward,
+            target_index,
+            offset: self.details.offset.as_value(),
+        };
+        let pushed = self.subscriber_shared_state.lock().receiver.
+            release_offset_with_entry(
+                &self.details,
+                ChannelId::new(0),
+                entry,
+            );
+        if !pushed {
+            // Drop will run naturally and emit a plain Drop entry.
+            return Err(ForwardError::CompletionQueueFull);
+        }
+        // Suppress the natural Drop so the publisher sees exactly one
+        // entry for this Sample handle — the DropAndForward we just
+        // pushed.
+        core::mem::forget(self);
+        Ok(())
     }
 
     /// Looks up `target` in the source service's declared `forwards_into`

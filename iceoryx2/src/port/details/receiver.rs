@@ -185,7 +185,55 @@ impl<Service: service::Service> Receiver<Service> {
                 Err(ZeroCopyReleaseError::RetrieveBufferFull) => {
                     error!(from self, "This should never happen! The publishers retrieve channel is full and the sample cannot be returned.");
                 }
+                Err(ZeroCopyReleaseError::ConnectionDoesNotSupportWideEntries) => {
+                    error!(from self, "This should never happen! `release` does not require a wide-entry sidetable.");
+                }
             }
+        }
+    }
+
+    /// Release the offset back to the publisher with an explicit
+    /// [`CompletionEntry`] variant (`Forward` / `DropAndForward`) for
+    /// the publish-subscribe forwarding pipeline. Used by
+    /// `Sample::forward_to` and `Sample::drop_and_forward_to`.
+    ///
+    /// Returns `true` if the entry was successfully written and the
+    /// offset was pushed onto the publisher's completion queue. Returns
+    /// `false` and logs an error if (a) the connection is no longer
+    /// alive, (b) the origin publisher_id no longer matches (a stale
+    /// chunk), (c) the publisher's retrieve buffer is full, or (d) the
+    /// connection has no sidetable (which should never occur on a
+    /// publisher with `forwards_into` set, since M3c enables the
+    /// sidetable on every such connection — but is reported defensively).
+    pub(crate) fn release_offset_with_entry(
+        &self,
+        chunk: &ChunkDetails,
+        channel_id: ChannelId,
+        entry: iceoryx2_cal::zero_copy_connection::completion_entry::CompletionEntry,
+    ) -> bool {
+        let connection_storage = unsafe { &mut *self.connection_storage.get() };
+        if let Some(connection) = connection_storage.get(chunk.connection_key) {
+            if connection.sender_port_id != chunk.origin {
+                return false;
+            }
+
+            unsafe { connection.data_segment.unregister_offset(chunk.offset) };
+            match connection
+                .receiver
+                .release_with_entry(chunk.offset, channel_id, entry)
+            {
+                Ok(()) => true,
+                Err(ZeroCopyReleaseError::RetrieveBufferFull) => {
+                    error!(from self, "This should never happen! The publisher's retrieve channel is full and the sample cannot be forwarded.");
+                    false
+                }
+                Err(ZeroCopyReleaseError::ConnectionDoesNotSupportWideEntries) => {
+                    error!(from self, "This should never happen! `release_offset_with_entry` was called on a connection without a wide-entry sidetable. Was the publisher set up with `forwards_into`?");
+                    false
+                }
+            }
+        } else {
+            false
         }
     }
 

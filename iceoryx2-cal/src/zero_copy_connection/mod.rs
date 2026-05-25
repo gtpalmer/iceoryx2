@@ -109,6 +109,10 @@ impl core::error::Error for ZeroCopyReceiveError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZeroCopyReclaimError {
     ReceiverReturnedCorruptedPointerOffset,
+    /// Returned by [`ZeroCopySender::reclaim_with_entry`] when called on
+    /// a connection that did not allocate a wide-entry sidetable
+    /// (i.e. the source service has no `forwards_into` declaration).
+    ConnectionDoesNotSupportWideEntries,
 }
 
 impl core::fmt::Display for ZeroCopyReclaimError {
@@ -122,6 +126,10 @@ impl core::error::Error for ZeroCopyReclaimError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZeroCopyReleaseError {
     RetrieveBufferFull,
+    /// Returned by [`ZeroCopyReceiver::release_with_entry`] when called
+    /// on a connection that did not allocate a wide-entry sidetable
+    /// (i.e. the source service has no `forwards_into` declaration).
+    ConnectionDoesNotSupportWideEntries,
 }
 
 impl core::fmt::Display for ZeroCopyReleaseError {
@@ -336,6 +344,20 @@ pub trait UnableToDeliverToReceiverFn:
 
 impl<F: Fn(u64, Duration) -> UnableToDeliverToReceiverAction> UnableToDeliverToReceiverFn for F {}
 
+/// A completion entry reclaimed by [`ZeroCopySender::reclaim_with_entry`]
+/// — combines the popped completion-queue offset with the matching
+/// sidetable entry for variant dispatch (pub/sub forwarding).
+///
+/// Only meaningful for connections that opted in to the wide-entry
+/// sidetable. For native (sidetable-disabled) connections the regular
+/// [`ZeroCopySender::reclaim`] path is used and this type is not
+/// produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimedEntry {
+    pub offset: PointerOffset,
+    pub entry: completion_entry::CompletionEntry,
+}
+
 pub trait ZeroCopySender: Debug + ZeroCopyPortDetails + NamedConcept + Send + Abandonable {
     fn try_send(
         &self,
@@ -355,6 +377,19 @@ pub trait ZeroCopySender: Debug + ZeroCopyPortDetails + NamedConcept + Send + Ab
 
     fn reclaim(&self, channel_id: ChannelId)
     -> Result<Option<PointerOffset>, ZeroCopyReclaimError>;
+
+    /// Like [`Self::reclaim`] but also returns the matching wide-entry
+    /// sidetable [`completion_entry::CompletionEntry`] used by the
+    /// publish-subscribe forwarding pipeline to dispatch per-variant
+    /// (Drop / Forward / DropAndForward).
+    ///
+    /// Returns `Ok(None)` when the completion queue is empty.
+    /// Implementations may return [`ZeroCopyReclaimError::ConnectionDoesNotSupportWideEntries`]
+    /// when called on a connection that did not allocate a sidetable.
+    fn reclaim_with_entry(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<Option<ReclaimedEntry>, ZeroCopyReclaimError>;
 
     /// # Safety
     ///
@@ -376,6 +411,25 @@ pub trait ZeroCopyReceiver:
         ptr: PointerOffset,
         channel_id: ChannelId,
     ) -> Result<(), ZeroCopyReleaseError>;
+
+    /// Release the offset like [`Self::release`], but instead of writing
+    /// a default [`completion_entry::CompletionEntryTag::Drop`] entry to
+    /// the wide-entry sidetable, write a caller-supplied variant
+    /// (typically [`completion_entry::CompletionEntryTag::Forward`] or
+    /// [`completion_entry::CompletionEntryTag::DropAndForward`]). This
+    /// is the publish-subscribe-forwarding entry point used by
+    /// `Sample::forward_to` / `Sample::drop_and_forward_to`. The entry's
+    /// `offset` field is overwritten to match `ptr` for consistency.
+    ///
+    /// Calling this on a connection without an allocated sidetable
+    /// returns [`ZeroCopyReleaseError::ConnectionDoesNotSupportWideEntries`].
+    fn release_with_entry(
+        &self,
+        ptr: PointerOffset,
+        channel_id: ChannelId,
+        entry: completion_entry::CompletionEntry,
+    ) -> Result<(), ZeroCopyReleaseError>;
+
     fn borrow_count(&self, channel_id: ChannelId) -> usize;
 }
 

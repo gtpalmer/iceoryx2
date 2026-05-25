@@ -405,7 +405,7 @@ impl<Service: service::Service> PublisherSharedState<Service> {
 
                 for i in history_start..history.len() {
                     let old_sample = unsafe { history.get_unchecked(i) };
-                    self.sender.retrieve_returned_samples();
+                    self.retrieve_returned_samples_and_dispatch_forwards();
 
                     let offset = PointerOffset::from_value(old_sample.offset);
                     match connection
@@ -439,12 +439,118 @@ impl<Service: service::Service> PublisherSharedState<Service> {
                 "{} since the corresponding publisher is already disconnected.", msg);
         }
 
+        // Variant-aware drain of returned samples *before* sending. For
+        // forwarding-enabled publishers, this also dispatches `Forward`
+        // and `DropAndForward` entries to target-service subscribers.
+        // For native publishers this is a cheap pass-through to the
+        // Drop-only retrieve.
+        self.retrieve_returned_samples_and_dispatch_forwards();
+
         fail!(from self, when self.update_connections(),
             "{} since the connections could not be updated.", msg);
 
         self.add_sample_to_history(offset, sample_size);
         self.sender
             .deliver_offset(offset, sample_size, ChannelId::new(0))
+    }
+
+    /// Drain returned samples and dispatch any `Forward` /
+    /// `DropAndForward` entries onto target-service subscribers.
+    ///
+    /// For native (non-forwarding) publishers, delegates to the existing
+    /// `Sender::retrieve_returned_samples` Drop-only path. For
+    /// forwarding-enabled publishers, walks each returned entry,
+    /// consults R10 on the source segment state, and fans out via the
+    /// `forwarding_targets[t].connections[j]` slots maintained in M3d.
+    /// Also drains Drop entries returned from forwarding-target
+    /// subscribers, so refcounts on forwarded buckets eventually reach
+    /// zero.
+    pub(crate) fn retrieve_returned_samples_and_dispatch_forwards(&self) {
+        if self.forwarding_targets.is_empty() {
+            self.sender.retrieve_returned_samples();
+            return;
+        }
+        self.sender
+            .retrieve_returned_samples_with_fanout(|target_index, offset, sample_size| {
+                self.fanout_forward_to_target(target_index as usize, offset, sample_size)
+            });
+        self.reclaim_from_forwarding_targets();
+    }
+
+    fn reclaim_from_forwarding_targets(&self) {
+        for target in &self.forwarding_targets {
+            for slot in target.connections.iter() {
+                let conn = unsafe { (*slot.get()).as_ref() };
+                if let Some(connection) = conn {
+                    loop {
+                        match <Service::Connection as iceoryx2_cal::zero_copy_connection::ZeroCopyConnection>::
+                            Sender::reclaim(&connection.sender, ChannelId::new(0))
+                        {
+                            Ok(Some(ptr)) => {
+                                // Target subscriber released a forwarded
+                                // bucket. Decrement source publisher's
+                                // refcount; if zero, the bucket is
+                                // reclaimed.
+                                self.sender.release_sample(ptr);
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                warn!(from self, "Unable to reclaim from forwarding-target connection {:?}: {:?}", connection, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn fanout_forward_to_target(
+        &self,
+        target_index: usize,
+        offset: PointerOffset,
+        sample_size: usize,
+    ) -> usize {
+        let target = match self.forwarding_targets.get(target_index) {
+            Some(t) => t,
+            None => {
+                warn!(from self, "Forward dispatch to invalid target_index {}.", target_index);
+                return 0;
+            }
+        };
+
+        let mut delivered = 0usize;
+        for slot in target.connections.iter() {
+            let conn = unsafe { (*slot.get()).as_ref() };
+            if let Some(connection) = conn {
+                let send_result = <Service::Connection as iceoryx2_cal::zero_copy_connection::ZeroCopyConnection>::
+                    Sender::try_send(
+                        &connection.sender,
+                        offset,
+                        sample_size,
+                        ChannelId::new(0),
+                    );
+                match send_result
+                {
+                    Ok(overflow) => {
+                        delivered += 1;
+                        if let Some(old) = overflow {
+                            // Target receiver displaced an older sample
+                            // — release our borrow on that one.
+                            self.sender.release_sample(old);
+                        }
+                    }
+                    Err(e) => {
+                        // Forwarding delivery failed for this subscriber
+                        // — treat like a degradation. Continue with the
+                        // others.
+                        warn!(from self, "Forward to target_index {} subscriber {:?} failed: {:?}",
+                            target_index, connection.receiver_port_id, e);
+                    }
+                }
+            }
+        }
+        delivered
     }
 }
 
@@ -732,16 +838,23 @@ impl<
                 .publish_subscribe()
                 .subscribers
                 .capacity();
-            // Forwarding-connection sidetable is sized to the target's
-            // completion queue (target_max_buffer + target_max_borrowed
-            // + 1). The target service's `forwards_into` may or may not
-            // be empty; we always allocate so that a target subscriber
-            // forwarding our buckets onward can write Forward entries
-            // back. M3a's R10 bitmap (on the source publisher) is what
-            // gates duplicates.
-            let target_sidetable_capacity = target_static.subscriber_max_buffer_size
-                + target_static.subscriber_max_borrowed_samples
-                + 1;
+            // Forwarding-connection sidetable capacity must agree with
+            // the target subscriber's `wide_entry_sidetable_capacity_per_channel`
+            // (see Subscriber wiring in M3c-iii), since both sides
+            // share the same SHM channel. The target subscriber only
+            // allocates a sidetable if *its* service declares
+            // `forwards_into` (so it may emit `Forward` /
+            // `DropAndForward` variants). When the target service has
+            // no `forwards_into`, target subscribers can only Drop —
+            // no sidetable is needed on the connection in either
+            // direction.
+            let target_sidetable_capacity = if target_static.forwards_into.is_empty() {
+                0
+            } else {
+                target_static.subscriber_max_buffer_size
+                    + target_static.subscriber_max_borrowed_samples
+                    + 1
+            };
             let target_connection_params = ForwardingTargetConnectionParams {
                 max_buffer_size: target_static.subscriber_max_buffer_size,
                 max_borrowed_samples: target_static.subscriber_max_borrowed_samples,
@@ -986,6 +1099,11 @@ impl<
         &self,
     ) -> Result<SampleMutUninit<Service, MaybeUninit<Payload>, UserHeader>, LoanError> {
         let shared_state = self.publisher_shared_state.lock();
+        // Drain returned samples (and dispatch any pending forwards) *before*
+        // allocating; for forwarding-enabled publishers the internal
+        // retrieve inside `Sender::allocate` is a no-op (it would
+        // mishandle variant entries).
+        shared_state.retrieve_returned_samples_and_dispatch_forwards();
         let chunk = shared_state
             .sender
             .allocate(shared_state.sender.sample_layout(1))?;
@@ -1170,6 +1288,9 @@ impl<
         }
 
         let sample_layout = shared_state.sender.sample_layout(slice_len);
+        // Drain returned samples (and dispatch any pending forwards)
+        // *before* allocating; see comment in `loan_uninit`.
+        shared_state.retrieve_returned_samples_and_dispatch_forwards();
         let chunk = shared_state.sender.allocate(sample_layout)?;
         let user_header_ptr: *mut UserHeader = chunk.user_header.cast();
         let header_ptr = chunk.header as *mut Header;

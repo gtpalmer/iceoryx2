@@ -4426,9 +4426,11 @@ pub mod service_publish_subscribe {
     }
 
     #[conformance_test]
-    pub fn forward_to_returns_not_yet_implemented_for_declared_target<Sut: Service>() {
-        // M3b: structural checks pass; runtime dispatch is M3e.
-        use iceoryx2::sample::ForwardError;
+    pub fn forward_to_succeeds_for_declared_target<Sut: Service>() {
+        // M3e: structural checks pass and the runtime dispatch path
+        // (push of a `Forward` entry onto the publisher's completion
+        // queue) succeeds. The publisher will pick up the entry on its
+        // next sweep and fan out to target-service subscribers.
         let source_name = generate_service_name();
         let target_name = generate_service_name();
         let config = testing::generate_isolated_config();
@@ -4454,10 +4456,7 @@ pub mod service_publish_subscribe {
         let sample = subscriber.receive().unwrap().unwrap();
 
         let result = sample.forward_to(&target_name);
-        assert_that!(
-            result,
-            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
-        );
+        assert_that!(result, eq Ok(()));
     }
 
     #[conformance_test]
@@ -4487,24 +4486,23 @@ pub mod service_publish_subscribe {
         publisher.send_copy(123u64).unwrap();
         let sample = subscriber.receive().unwrap().unwrap();
 
-        // First call: structural checks pass; R9 bit is set; M3e
-        // dispatch is unimplemented.
+        // First call: structural checks pass, R9 bit set, Forward entry
+        // pushed.
         let first = sample.forward_to(&target_name);
-        assert_that!(
-            first,
-            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
-        );
+        assert_that!(first, eq Ok(()));
 
         // Second call to the same target on the same Sample handle:
-        // R9 detects the duplicate before the unimplemented dispatch
-        // path is reached.
+        // R9 detects the duplicate before any further work happens.
         let second = sample.forward_to(&target_name);
         assert_that!(second, eq Err(ForwardError::AlreadyForwarded));
     }
 
     #[conformance_test]
-    pub fn drop_and_forward_to_consumes_sample_and_returns_not_yet_implemented<Sut: Service>() {
-        use iceoryx2::sample::ForwardError;
+    pub fn drop_and_forward_to_consumes_sample_and_succeeds<Sut: Service>() {
+        // M3e: drop_and_forward_to consumes the sample and pushes a
+        // single fused DropAndForward entry onto the completion queue.
+        // The Sample's natural Drop is suppressed so the publisher sees
+        // exactly one entry.
         let source_name = generate_service_name();
         let target_name = generate_service_name();
         let config = testing::generate_isolated_config();
@@ -4529,16 +4527,8 @@ pub mod service_publish_subscribe {
         publisher.send_copy(123u64).unwrap();
         let sample = subscriber.receive().unwrap().unwrap();
 
-        // drop_and_forward_to consumes the sample. The sample's Drop runs
-        // implicitly when the function returns / the value goes out of
-        // scope, so the subscriber's borrow is released — matching the
-        // eventual M3e semantics for the drop portion. The forward
-        // portion currently returns the sentinel.
         let result = sample.drop_and_forward_to(&target_name);
-        assert_that!(
-            result,
-            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
-        );
+        assert_that!(result, eq Ok(()));
     }
 
     #[conformance_test]
@@ -4599,7 +4589,6 @@ pub mod service_publish_subscribe {
     pub fn forward_to_different_targets_on_same_sample_passes_r9<Sut: Service>() {
         // R9 is per-(Sample, target). Forwarding the same Sample to two
         // different targets is allowed.
-        use iceoryx2::sample::ForwardError;
         let source_name = generate_service_name();
         let target_a = generate_service_name();
         let target_b = generate_service_name();
@@ -4634,14 +4623,8 @@ pub mod service_publish_subscribe {
 
         let r_a = sample.forward_to(&target_a);
         let r_b = sample.forward_to(&target_b);
-        assert_that!(
-            r_a,
-            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
-        );
-        assert_that!(
-            r_b,
-            eq Err(ForwardError::ForwardingRuntimePathNotYetImplemented)
-        );
+        assert_that!(r_a, eq Ok(()));
+        assert_that!(r_b, eq Ok(()));
     }
 
     #[conformance_test]
@@ -4836,5 +4819,235 @@ pub mod service_publish_subscribe {
         assert_that!(publisher.__forwarding_target_count(), eq 2);
         assert_that!(publisher.__forwarding_connection_count(0), eq 2);
         assert_that!(publisher.__forwarding_connection_count(1), eq 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Publish-subscribe forwarding (Milestone 3e: end-to-end dispatch)
+    // -----------------------------------------------------------------
+
+    #[conformance_test]
+    pub fn forward_to_delivers_payload_to_target_subscriber<Sut: Service>() {
+        // M3e: forwarding a sample causes the target service's subscribers
+        // to receive that same payload (zero-copy, no re-allocation).
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let source_subscriber = source.subscriber_builder().create().unwrap();
+        let target_subscriber = target.subscriber_builder().create().unwrap();
+
+        publisher.send_copy(42u64).unwrap();
+        let sample = source_subscriber.receive().unwrap().unwrap();
+        assert_that!(*sample, eq 42u64);
+
+        // The forward_to call pushes a Forward entry on the source-side
+        // CQ. The fanout to the target subscriber happens lazily on
+        // the publisher's next sweep (any send / loan path triggers
+        // it). We need another publisher action to drive the sweep:
+        let _ = sample.forward_to(&target_name).unwrap();
+        // Trigger the publisher's variant-aware retrieve via a fresh
+        // loan (which calls retrieve_returned_samples_and_dispatch_forwards).
+        let _trigger = publisher.loan_uninit().unwrap();
+
+        let forwarded = target_subscriber.receive().unwrap();
+        assert_that!(forwarded.is_some(), eq true);
+        let forwarded = forwarded.unwrap();
+        assert_that!(*forwarded, eq 42u64);
+    }
+
+    #[conformance_test]
+    pub fn forward_to_fans_out_to_multiple_target_subscribers<Sut: Service>() {
+        // M3e: a single forward request fans out to every subscriber of
+        // the target service.
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let source_subscriber = source.subscriber_builder().create().unwrap();
+        let target_subscriber_a = target.subscriber_builder().create().unwrap();
+        let target_subscriber_b = target.subscriber_builder().create().unwrap();
+
+        publisher.send_copy(7u64).unwrap();
+        let sample = source_subscriber.receive().unwrap().unwrap();
+        let _ = sample.forward_to(&target_name).unwrap();
+        let _trigger = publisher.loan_uninit().unwrap();
+
+        let a = target_subscriber_a.receive().unwrap();
+        let b = target_subscriber_b.receive().unwrap();
+        assert_that!(a.is_some(), eq true);
+        assert_that!(b.is_some(), eq true);
+        assert_that!(*a.unwrap(), eq 7u64);
+        assert_that!(*b.unwrap(), eq 7u64);
+    }
+
+    #[conformance_test]
+    pub fn forward_to_multiple_targets_delivers_to_each<Sut: Service>() {
+        // M3e: forwarding the same sample to two distinct targets
+        // (allowed by R9 since the (sample, target) pair differs)
+        // results in each target's subscribers receiving the payload.
+        let source_name = generate_service_name();
+        let target_a = generate_service_name();
+        let target_b = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_a, target_b])
+            .create()
+            .unwrap();
+        let ta = node
+            .service_builder(&target_a)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+        let tb = node
+            .service_builder(&target_b)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let source_subscriber = source.subscriber_builder().create().unwrap();
+        let sub_a = ta.subscriber_builder().create().unwrap();
+        let sub_b = tb.subscriber_builder().create().unwrap();
+
+        publisher.send_copy(99u64).unwrap();
+        // After send: publisher's update_connections sweep should have
+        // established forwarding connections to both sub_a and sub_b.
+        assert_that!(publisher.__forwarding_connection_count(0), eq 1);
+        assert_that!(publisher.__forwarding_connection_count(1), eq 1);
+
+        let sample = source_subscriber.receive().unwrap().unwrap();
+        sample.forward_to(&target_a).unwrap();
+        sample.forward_to(&target_b).unwrap();
+        let _trigger = publisher.loan_uninit().unwrap();
+
+        let ra = sub_a.receive().unwrap();
+        let rb = sub_b.receive().unwrap();
+        assert_that!(ra.is_some(), eq true);
+        assert_that!(rb.is_some(), eq true);
+        assert_that!(*ra.unwrap(), eq 99u64);
+        assert_that!(*rb.unwrap(), eq 99u64);
+    }
+
+    #[conformance_test]
+    pub fn drop_and_forward_to_delivers_to_target_and_releases_source<Sut: Service>() {
+        // M3e: drop_and_forward_to consumes the source sample (releasing
+        // its borrow) AND delivers the payload to the target service.
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let source_subscriber = source.subscriber_builder().create().unwrap();
+        let target_subscriber = target.subscriber_builder().create().unwrap();
+
+        publisher.send_copy(2026u64).unwrap();
+        let sample = source_subscriber.receive().unwrap().unwrap();
+        sample.drop_and_forward_to(&target_name).unwrap();
+        // Sample is consumed; its borrow has been released to the
+        // publisher in the fused DropAndForward entry.
+        let _trigger = publisher.loan_uninit().unwrap();
+
+        let forwarded = target_subscriber.receive().unwrap();
+        assert_that!(forwarded.is_some(), eq true);
+        assert_that!(*forwarded.unwrap(), eq 2026u64);
+    }
+
+    #[conformance_test]
+    pub fn forward_with_no_target_subscribers_does_not_leak<Sut: Service>() {
+        // M3e: forwarding a sample to a target service that currently
+        // has no subscribers is well-defined — the Forward entry is
+        // pushed, the publisher's R10 bit is set, refcount delta is +0,
+        // and the source publisher can continue sending freely.
+        let source_name = generate_service_name();
+        let target_name = generate_service_name();
+        let config = testing::generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let source = node
+            .service_builder(&source_name)
+            .publish_subscribe::<u64>()
+            .forwards_into(vec![target_name])
+            .create()
+            .unwrap();
+        let _target = node
+            .service_builder(&target_name)
+            .publish_subscribe::<u64>()
+            .accepts_forwarders_from(vec![source_name])
+            .publisher_mode(PublisherMode::ForwarderOnly)
+            .create()
+            .unwrap();
+
+        let publisher = source.publisher_builder().create().unwrap();
+        let source_subscriber = source.subscriber_builder().create().unwrap();
+
+        // No target subscribers exist.
+        for n in 0..16u64 {
+            publisher.send_copy(n).unwrap();
+            let sample = source_subscriber.receive().unwrap().unwrap();
+            sample.forward_to(&target_name).unwrap();
+            // Sample drops here; publisher's next send drains the CQ.
+        }
+
+        // Sanity: still able to send + receive natively after many
+        // forwards-to-nowhere.
+        publisher.send_copy(9999u64).unwrap();
+        let final_sample = source_subscriber.receive().unwrap();
+        assert_that!(final_sample.is_some(), eq true);
+        assert_that!(*final_sample.unwrap(), eq 9999u64);
     }
 }

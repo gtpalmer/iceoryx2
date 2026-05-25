@@ -582,6 +582,19 @@ impl<Service: service::Service> Sender<Service> {
     }
 
     pub(crate) fn retrieve_returned_samples(&self) {
+        if self.wide_entry_sidetable_capacity_per_channel > 0 {
+            // Forwarding-enabled (publish-subscribe with `forwards_into`):
+            // the Drop-only reclaim path is unsafe here because it would
+            // mishandle `Forward` and `DropAndForward` variants that the
+            // subscriber may have written. The caller (publisher shared
+            // state) drains the queue with
+            // `retrieve_returned_samples_with_fanout` *before* invoking
+            // any Sender method that internally retries this call.
+            // Returning here makes the internal call a no-op so the two
+            // paths don't double-process or, worse, treat Forward
+            // entries as Drop.
+            return;
+        }
         for i in 0..self.len() {
             if let Some(connection) = self.get(i) {
                 for channel_id in 0..self.number_of_channels {
@@ -598,6 +611,107 @@ impl<Service: service::Service> Sender<Service> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Variant-aware reclaim for publish-subscribe-forwarding publishers.
+    ///
+    /// For each entry popped from a native (source-side) subscriber's
+    /// completion queue, dispatches per variant:
+    /// * `Drop`: regular `-1` refcount, reclaim bucket on zero.
+    /// * `Forward(T)`: consult per-bucket forwarding-history bitmap
+    ///   (R10); if already set, no-op; if unset, set the bit, call
+    ///   `on_forward(T, offset, sample_size)` which dispatches the offset
+    ///   to each target subscriber and returns the number of successful
+    ///   deliveries `K`. Apply `+K` refcount delta.
+    /// * `DropAndForward(T)`: same bitmap check; on first dispatch
+    ///   `+K - 1`, otherwise `-1`.
+    ///
+    /// Caller supplies the fan-out closure because the per-target
+    /// subscriber connections live on `PublisherSharedState` (not on
+    /// `Sender`, which is shared with request-response).
+    pub(crate) fn retrieve_returned_samples_with_fanout<F>(&self, mut on_forward: F)
+    where
+        F: FnMut(u8, PointerOffset, usize) -> usize,
+    {
+        for i in 0..self.len() {
+            let connection_present = self.get(i).is_some();
+            if !connection_present {
+                continue;
+            }
+            for channel_id in 0..self.number_of_channels {
+                let id = ChannelId::new(channel_id);
+                loop {
+                    let reclaim_result = {
+                        let connection = match self.get(i) {
+                            Some(c) => c,
+                            None => break,
+                        };
+                        connection.sender.reclaim_with_entry(id)
+                    };
+                    match reclaim_result {
+                        Ok(Some(reclaimed)) => {
+                            self.dispatch_reclaimed_entry(
+                                reclaimed.offset,
+                                reclaimed.entry,
+                                &mut on_forward,
+                            );
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!(from self, "Unable to reclaim samples (variant-aware) from connection {} due to {:?}.", i, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn dispatch_reclaimed_entry<F>(
+        &self,
+        offset: PointerOffset,
+        entry: iceoryx2_cal::zero_copy_connection::completion_entry::CompletionEntry,
+        on_forward: &mut F,
+    ) where
+        F: FnMut(u8, PointerOffset, usize) -> usize,
+    {
+        use iceoryx2_cal::zero_copy_connection::completion_entry::CompletionEntryTag;
+
+        match entry.tag {
+            CompletionEntryTag::Drop => {
+                self.release_sample(offset);
+            }
+            CompletionEntryTag::Forward => {
+                let segment_id = offset.segment_id().value() as usize;
+                let segment_state = &self.segment_states[segment_id];
+                let bucket_size = segment_state.payload_size();
+                if segment_state
+                    .check_and_set_forwarding_bit(offset.offset(), entry.target_index)
+                {
+                    let delivered = on_forward(entry.target_index, offset, bucket_size);
+                    for _ in 0..delivered {
+                        self.borrow_sample(offset);
+                    }
+                }
+                // If R10 was already set, this is a duplicate Forward —
+                // no-op (zero refcount delta, no fanout).
+            }
+            CompletionEntryTag::DropAndForward => {
+                let segment_id = offset.segment_id().value() as usize;
+                let segment_state = &self.segment_states[segment_id];
+                let bucket_size = segment_state.payload_size();
+                if segment_state
+                    .check_and_set_forwarding_bit(offset.offset(), entry.target_index)
+                {
+                    let delivered = on_forward(entry.target_index, offset, bucket_size);
+                    for _ in 0..delivered {
+                        self.borrow_sample(offset);
+                    }
+                }
+                // The drop portion runs unconditionally.
+                self.release_sample(offset);
             }
         }
     }

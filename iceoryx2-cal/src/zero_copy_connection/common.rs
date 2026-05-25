@@ -946,6 +946,82 @@ pub mod details {
             }
         }
 
+        fn reclaim_with_entry(
+            &self,
+            channel_id: ChannelId,
+        ) -> Result<Option<ReclaimedEntry>, ZeroCopyReclaimError> {
+            use crate::zero_copy_connection::completion_entry::CompletionEntryTag;
+
+            debug_assert!(channel_id.value() < self.storage.get().channels.capacity());
+
+            let msg = "Unable to reclaim sample with entry";
+
+            let storage = self.storage.get();
+            let channel = &storage.channels[channel_id.value()];
+            let sidetable_capacity = channel.wide_entry_sidetable.capacity();
+            if sidetable_capacity == 0 {
+                fail!(from self,
+                    with ZeroCopyReclaimError::ConnectionDoesNotSupportWideEntries,
+                    "{} since this connection has no wide-entry sidetable allocated.",
+                    msg);
+            }
+            match unsafe { channel.completion_queue.pop() } {
+                None => Ok(None),
+                Some(v) => {
+                    let next_index_cell =
+                        unsafe { &mut *self.wide_entry_next_index[channel_id.value()].get() };
+                    let entry = unsafe {
+                        channel.wide_entry_sidetable.read(*next_index_cell)
+                    };
+                    *next_index_cell = next_index_cell.wrapping_add(1);
+
+                    let pointer_offset = PointerOffset::from_value(v);
+                    let segment_id = pointer_offset.segment_id().value() as usize;
+
+                    debug_assert!(segment_id < storage.number_of_segments as usize);
+
+                    if segment_id >= storage.segment_details.len() {
+                        fail!(from self,
+                            with ZeroCopyReclaimError::ReceiverReturnedCorruptedPointerOffset,
+                            "{} since the receiver returned a non-existing segment id {:?}.",
+                            msg, pointer_offset);
+                    }
+
+                    // Only `Drop` and `DropAndForward` actually release
+                    // the subscriber's borrow — those entries are paired
+                    // with a `used_chunk_list.insert` from a prior
+                    // `try_send`, so we remove. `Forward` does *not*
+                    // release the subscriber's borrow (the subscriber
+                    // still holds the sample); the used_chunk_list slot
+                    // remains, and will be removed when the final
+                    // Drop / DropAndForward arrives.
+                    let releases_borrow = !matches!(entry.tag, CompletionEntryTag::Forward);
+                    if releases_borrow {
+                        let segment_details =
+                            storage.get_segment_details(segment_id, channel_id.value());
+                        debug_assert!(
+                            pointer_offset.offset()
+                                % segment_details.sample_size.load(Ordering::Relaxed)
+                                == 0
+                        );
+                        let index = pointer_offset.offset()
+                            / segment_details.sample_size.load(Ordering::Relaxed);
+
+                        if !segment_details.used_chunk_list.remove(index) {
+                            fail!(from self,
+                                with ZeroCopyReclaimError::ReceiverReturnedCorruptedPointerOffset,
+                                "{} since the receiver returned a corrupted offset {:?}.",
+                                msg, pointer_offset);
+                        }
+                    }
+                    Ok(Some(ReclaimedEntry {
+                        offset: pointer_offset,
+                        entry,
+                    }))
+                }
+            }
+        }
+
         unsafe fn acquire_used_offsets<F: FnMut(PointerOffset)>(&self, mut callback: F) {
             for (n, segment_details) in self.storage.get().segment_details.iter().enumerate() {
                 segment_details.used_chunk_list.remove_all(|index| {
@@ -1107,25 +1183,60 @@ pub mod details {
             ptr: PointerOffset,
             channel_id: ChannelId,
         ) -> Result<(), ZeroCopyReleaseError> {
+            self.release_impl(
+                ptr,
+                channel_id,
+                crate::zero_copy_connection::completion_entry::CompletionEntry {
+                    tag: crate::zero_copy_connection::completion_entry::CompletionEntryTag::Drop,
+                    target_index: 0,
+                    offset: ptr.as_value(),
+                },
+            )
+        }
+
+        fn release_with_entry(
+            &self,
+            ptr: PointerOffset,
+            channel_id: ChannelId,
+            mut entry: crate::zero_copy_connection::completion_entry::CompletionEntry,
+        ) -> Result<(), ZeroCopyReleaseError> {
+            debug_assert!(channel_id.value() < self.storage.get().channels.capacity());
+            let channel = &self.storage.get().channels[channel_id.value()];
+            if channel.wide_entry_sidetable.capacity() == 0 {
+                fail!(from self,
+                    with ZeroCopyReleaseError::ConnectionDoesNotSupportWideEntries,
+                    "Unable to release pointer with entry since this connection has no wide-entry sidetable allocated.");
+            }
+            // Force entry.offset to match the released pointer offset
+            // — both for correctness (subscribers writing the offset to
+            // two places is error-prone) and consistency with `release`.
+            entry.offset = ptr.as_value();
+            self.release_impl(ptr, channel_id, entry)
+        }
+    }
+
+    impl<Storage: DynamicStorage<SharedManagementData>> Receiver<Storage> {
+        fn release_impl(
+            &self,
+            ptr: PointerOffset,
+            channel_id: ChannelId,
+            entry: crate::zero_copy_connection::completion_entry::CompletionEntry,
+        ) -> Result<(), ZeroCopyReleaseError> {
+            use crate::zero_copy_connection::completion_entry::CompletionEntryTag;
+
             debug_assert!(channel_id.value() < self.storage.get().channels.capacity());
 
-            // If the connection has a wide-entry sidetable, write a
-            // default `CompletionEntry::Drop` into the slot at the
-            // current next-index BEFORE pushing to the queue. The
-            // queue's release/acquire on its tail counter then makes
-            // the sidetable write visible to the publisher when the
-            // publisher's reclaim sees the pop. M3e will replace the
-            // default with the real variant for `Forward` /
-            // `DropAndForward` operations via a separate API.
+            // Forward entries signal "publisher should also dispatch this
+            // offset to a target service" while the subscriber is still
+            // holding its borrow. Drop and DropAndForward both release
+            // the subscriber's borrow, so they decrement the borrow
+            // counter on successful CQ push.
+            let releases_borrow = !matches!(entry.tag, CompletionEntryTag::Forward);
+
             let channel = &self.storage.get().channels[channel_id.value()];
             let sidetable_capacity = channel.wide_entry_sidetable.capacity();
             let next_index_cell = unsafe { &mut *self.wide_entry_next_index[channel_id.value()].get() };
             if sidetable_capacity > 0 {
-                let entry = crate::zero_copy_connection::completion_entry::CompletionEntry {
-                    tag: crate::zero_copy_connection::completion_entry::CompletionEntryTag::Drop,
-                    target_index: 0,
-                    offset: ptr.as_value(),
-                };
                 unsafe {
                     channel.wide_entry_sidetable.write(*next_index_cell, entry);
                 };
@@ -1137,7 +1248,9 @@ pub mod details {
                     .push(ptr.as_value())
             } {
                 true => {
-                    *self.borrow_counter(channel_id) -= 1;
+                    if releases_borrow {
+                        *self.borrow_counter(channel_id) -= 1;
+                    }
                     if sidetable_capacity > 0 {
                         *next_index_cell = next_index_cell.wrapping_add(1);
                     }
