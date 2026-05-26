@@ -203,6 +203,20 @@ path = "rust/publish_subscribe_with_user_header/publisher.rs"
 name = "publish_subscribe_user_header_subscriber"
 path = "rust/publish_subscribe_with_user_header/subscriber.rs"
 
+# publish_subscribe_forwarding
+
+[[example]]
+name = "publish_subscribe_forwarding_source_publisher"
+path = "rust/publish_subscribe_forwarding/source_publisher.rs"
+
+[[example]]
+name = "publish_subscribe_forwarding_triage_subscriber"
+path = "rust/publish_subscribe_forwarding/triage_subscriber.rs"
+
+[[example]]
+name = "publish_subscribe_forwarding_target_subscriber"
+path = "rust/publish_subscribe_forwarding/target_subscriber.rs"
+
 # request_response
 
 [[example]]

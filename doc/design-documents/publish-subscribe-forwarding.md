@@ -927,9 +927,17 @@ attribute.
   `local_threadsafe` service variants.
 * **M5a-i**: Landed. Subset of the C FFI surface (publisher mode,
   Sample-side forward APIs, ForwardError mapping).
-* **M5a-ii, M5b, M5c, M5d**: Outstanding. Remaining C FFI surface
-  (array-marshalled `forwards_into` / `accepts_forwarders_from`),
-  C++ wrapper, Python wrapper, examples + binding tests.
+* **M5a-ii**: Landed. Array-marshalled C FFI setters for
+  `forwards_into` / `accepts_forwarders_from`; `publisher_mode` field
+  on the static-config struct; 10 C-FFI tests across IPC + LOCAL.
+* **M5b**: Landed. C++ wrapper covering `PublisherMode`,
+  `ForwardError`, the three builder methods, and the two Sample-side
+  forwarding methods; 6 C++ end-to-end tests across IPC + LOCAL.
+* **M5c**: Landed. Python (PyO3) wrapper with the same surface; 6
+  Python end-to-end tests across IPC + LOCAL.
+* **M5d**: Landed. Rust + Python + C++ triage example (three binaries
+  per language: source publisher, triage subscriber, target
+  subscriber).
 
 Each milestone section below records its implementation status, the
 commits that landed it, and any notable refinements to the original
@@ -1478,7 +1486,7 @@ ownership handling than the simpler M5a-i functions.
   `create_with_too_many_forwards_into_fails`,
   `forwards_into_persists_declared_targets`, etc.
 
-**Status:** Outstanding.
+**Status:** Landed.
 
 #### Milestone 5b – C++ wrapper
 
@@ -1499,7 +1507,7 @@ Type-safe C++ surface over the C FFI from M5a.
   sufficient — they cover the same paths in the underlying Rust
   core via the C FFI).
 
-**Status:** Outstanding.
+**Status:** Landed.
 
 #### Milestone 5c – Python wrapper
 
@@ -1514,7 +1522,7 @@ directly to Rust via PyO3 as is already the convention in
   raising a typed `ForwardError` on failure.
 * Python tests in `iceoryx2-ffi/python/tests/`.
 
-**Status:** Outstanding.
+**Status:** Landed.
 
 #### Milestone 5d – Examples + ROADMAP
 
@@ -1530,8 +1538,14 @@ User-facing examples and the public-facing roadmap entry.
   extension as landed and distinguish it from the still-planned
   Pipeline messaging pattern.
 
-**Status:** ROADMAP entry landed in this branch; example code
-outstanding.
+**Status:** Landed. Rust example in
+[`examples/rust/publish_subscribe_forwarding/`][examples_rust]
+(`source_publisher.rs`, `triage_subscriber.rs`,
+`target_subscriber.rs`); Python equivalent in
+`examples/python/publish_subscribe_forwarding/`; C++ equivalent in
+`examples/cxx/publish_subscribe_forwarding/`. ROADMAP entry landed
+earlier in the branch (commit `ROADMAP: mark publish-subscribe
+forwarding extension as landed`).
 
 **Results:** Feature is shippable across all supported language bindings.
 
