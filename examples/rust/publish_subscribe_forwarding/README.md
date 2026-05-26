@@ -73,3 +73,52 @@ Per-bucket R10 (publisher-side, per-target) and per-Sample R9
 (subscriber-side, per-target) make the operation safe under any number
 of triage subscribers and any combination of `forward_to` /
 `drop_and_forward_to` calls. See the design doc for details.
+
+## Removing the start-order constraint
+
+The example above hard-codes the dependency: target_subscriber.rs is
+the canonical creator of `obstacle_scans`, so it has to run first. If
+you'd rather have the three processes start in any order, have **every
+process that touches the target service call `open_or_create` on it
+with the same parameters** — including the source publisher process.
+Whichever process runs first wins the create race; the others open the
+existing SHM region:
+
+```rust
+// Source publisher process: bootstrap the target service before
+// constructing the publisher.
+let _obstacle_scans = node
+    .service_builder(&obstacle_scans_name)
+    .publish_subscribe::<LidarScan>()
+    .accepts_forwarders_from(vec![raw_scans_name])
+    .publisher_mode(PublisherMode::ForwarderOnly)
+    .open_or_create()?;
+
+// Now the publisher attaches to a target service that's guaranteed to
+// exist:
+let raw_scans = node
+    .service_builder(&raw_scans_name)
+    .publish_subscribe::<LidarScan>()
+    .forwards_into(vec![obstacle_scans_name])
+    .open_or_create()?;
+let publisher = raw_scans.publisher_builder().create()?;
+```
+
+Caveats:
+
+* **Parameter consistency is on you.** `accepts_forwarders_from`,
+  `publisher_mode`, `max_publishers`, `subscriber_max_buffer_size`,
+  etc. must match exactly across every process that calls
+  `open_or_create` on a given service; mismatch surfaces as
+  `IncompatibleAcceptsForwardersFrom` / `IncompatibleMode` / etc.
+  errors at the second open. A small shared module returning the
+  configured builder is the usual fix.
+* **Service lifetime is reference-counted across nodes.** If the
+  source publisher creates `obstacle_scans` and exits before any
+  target subscriber has opened it, the SHM region is reaped. A
+  subsequent run recreates it — generally fine, but means the
+  "boot, create, exit" pattern does not pre-stage services for
+  arbitrarily-delayed consumers.
+
+This pattern is the one production iceoryx2 deployments tend to use,
+specifically to remove start-order assumptions.
