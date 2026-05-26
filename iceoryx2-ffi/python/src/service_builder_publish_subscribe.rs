@@ -22,6 +22,8 @@ use crate::error::{
 use crate::port_factory_publish_subscribe::{
     PortFactoryPublishSubscribe, PortFactoryPublishSubscribeType,
 };
+use crate::publisher_mode::PublisherMode;
+use crate::service_name::ServiceName;
 use crate::type_detail::TypeDetail;
 use crate::type_storage::TypeStorage;
 
@@ -256,6 +258,71 @@ impl ServiceBuilderPublishSubscribe {
             ServiceBuilderPublishSubscribeType::Local(v) => {
                 let this = v.clone();
                 let this = this.max_nodes(value);
+                self.clone_local(this)
+            }
+        }
+    }
+
+    /// Controls which kinds of publishers may attach to the `Service`.
+    /// See `PublisherMode`.
+    pub fn publisher_mode(&self, value: PublisherMode) -> Self {
+        let mode: iceoryx2::port::publisher_mode::PublisherMode = value.into();
+        match &self.value {
+            ServiceBuilderPublishSubscribeType::Ipc(v) => {
+                let this = v.clone();
+                let this = this.publisher_mode(mode);
+                self.clone_ipc(this)
+            }
+            ServiceBuilderPublishSubscribeType::Local(v) => {
+                let this = v.clone();
+                let this = this.publisher_mode(mode);
+                self.clone_local(this)
+            }
+        }
+    }
+
+    /// Declares the list of target services this publish-subscribe
+    /// service may forward into. Subscribers of this service can
+    /// request that a received `Sample` be re-emitted onto a declared
+    /// target via `Sample.forward_to` or
+    /// `Sample.drop_and_forward_to`.
+    ///
+    /// The list may contain at most 8 entries and must not contain
+    /// duplicates or this service's own name. Validation happens at
+    /// service-creation time (via `create` / `open_or_create`); the
+    /// builder method itself stores the list verbatim.
+    pub fn forwards_into(&self, targets: Vec<PyRef<ServiceName>>) -> Self {
+        let names: Vec<iceoryx2::prelude::ServiceName> =
+            targets.into_iter().map(|n| n.0).collect();
+        match &self.value {
+            ServiceBuilderPublishSubscribeType::Ipc(v) => {
+                let this = v.clone();
+                let this = this.forwards_into(names);
+                self.clone_ipc(this)
+            }
+            ServiceBuilderPublishSubscribeType::Local(v) => {
+                let this = v.clone();
+                let this = this.forwards_into(names);
+                self.clone_local(this)
+            }
+        }
+    }
+
+    /// Declares the list of source services this publish-subscribe
+    /// service accepts forwarded buckets from. Symmetric to
+    /// `forwards_into`.
+    pub fn accepts_forwarders_from(&self, sources: Vec<PyRef<ServiceName>>) -> Self {
+        let names: Vec<iceoryx2::prelude::ServiceName> =
+            sources.into_iter().map(|n| n.0).collect();
+        match &self.value {
+            ServiceBuilderPublishSubscribeType::Ipc(v) => {
+                let this = v.clone();
+                let this = this.accepts_forwarders_from(names);
+                self.clone_ipc(this)
+            }
+            ServiceBuilderPublishSubscribeType::Local(v) => {
+                let this = v.clone();
+                let this = this.accepts_forwarders_from(names);
                 self.clone_local(this)
             }
         }

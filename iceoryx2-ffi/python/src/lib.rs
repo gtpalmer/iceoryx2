@@ -58,6 +58,7 @@ pub mod port_factory_server;
 pub mod port_factory_subscriber;
 pub mod port_factory_writer;
 pub mod publisher;
+pub mod publisher_mode;
 pub mod reader;
 pub mod request_header;
 pub mod request_mut;
@@ -171,6 +172,7 @@ fn _iceoryx2(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::port_factory_subscriber::PortFactorySubscriber>()?;
     m.add_class::<crate::port_factory_writer::PortFactoryWriter>()?;
     m.add_class::<crate::publisher::Publisher>()?;
+    m.add_class::<crate::publisher_mode::PublisherMode>()?;
     m.add_class::<crate::reader::Reader>()?;
     m.add_class::<crate::request_header::RequestHeader>()?;
     m.add_class::<crate::request_mut::RequestMut>()?;
@@ -365,6 +367,10 @@ fn _iceoryx2(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "EntryHandleMutError",
         py.get_type::<crate::error::EntryHandleMutError>(),
+    )?;
+    m.add(
+        "ForwardError",
+        py.get_type::<crate::error::ForwardError>(),
     )?;
 
     Ok(())

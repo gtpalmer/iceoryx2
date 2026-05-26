@@ -391,3 +391,101 @@ def test_history_is_delivered_with_update_connections(
         assert received_sample.payload().contents.data == 85 + i
 
     assert not subscriber.has_samples()
+
+
+# ----------------------------------------------------------------------
+# Publish-subscribe forwarding (Milestone 5c – Python wrapper coverage)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("service_type", service_types)
+def test_publisher_mode_native_only_persists(
+    service_type: iox2.ServiceType,
+) -> None:
+    config = iox2.testing.generate_isolated_config()
+    node = iox2.NodeBuilder.new().config(config).create(service_type)
+
+    service_name = iox2.testing.generate_service_name()
+    factory = (
+        node.service_builder(service_name)
+        .publish_subscribe(Payload)
+        .publisher_mode(iox2.PublisherMode.NativeOnly)
+        .create()
+    )
+    assert factory is not None
+
+    # Re-opening the same service requesting Mixed should fail because
+    # the stored mode is NativeOnly.
+    with pytest.raises(Exception):
+        node.service_builder(service_name).publish_subscribe(Payload).publisher_mode(
+            iox2.PublisherMode.Mixed
+        ).open()
+
+
+@pytest.mark.parametrize("service_type", service_types)
+def test_forwards_into_round_trip_via_python_wrapper(
+    service_type: iox2.ServiceType,
+) -> None:
+    config = iox2.testing.generate_isolated_config()
+    node = iox2.NodeBuilder.new().config(config).create(service_type)
+
+    source_name = iox2.testing.generate_service_name()
+    target_name = iox2.testing.generate_service_name()
+
+    # Target service accepts forwarders from the source, ForwarderOnly.
+    target = (
+        node.service_builder(target_name)
+        .publish_subscribe(Payload)
+        .accepts_forwarders_from([source_name])
+        .publisher_mode(iox2.PublisherMode.ForwarderOnly)
+        .create()
+    )
+    # Source declares forwards_into = [target].
+    source = (
+        node.service_builder(source_name)
+        .publish_subscribe(Payload)
+        .forwards_into([target_name])
+        .create()
+    )
+
+    publisher = source.publisher_builder().create()
+    source_subscriber = source.subscriber_builder().create()
+    target_subscriber = target.subscriber_builder().create()
+
+    publisher.send_copy(Payload(data=42))
+
+    received_source = source_subscriber.receive()
+    assert received_source is not None
+    received_source.forward_to(target_name)
+
+    # Drive the publisher's retrieve-and-dispatch by another loan.
+    _trigger = publisher.loan_uninit()
+
+    received_target = target_subscriber.receive()
+    assert received_target is not None
+    assert received_target.payload().contents.data == 42
+
+
+@pytest.mark.parametrize("service_type", service_types)
+def test_forward_to_undeclared_target_raises(
+    service_type: iox2.ServiceType,
+) -> None:
+    config = iox2.testing.generate_isolated_config()
+    node = iox2.NodeBuilder.new().config(config).create(service_type)
+
+    service_name = iox2.testing.generate_service_name()
+    service = (
+        node.service_builder(service_name).publish_subscribe(Payload).create()
+    )
+
+    publisher = service.publisher_builder().create()
+    subscriber = service.subscriber_builder().create()
+
+    publisher.send_copy(Payload(data=7))
+    received = subscriber.receive()
+    assert received is not None
+
+    # No forwards_into declared; any target is unauthorized.
+    unrelated_target = iox2.testing.generate_service_name()
+    with pytest.raises(iox2.ForwardError):
+        received.forward_to(unrelated_target)

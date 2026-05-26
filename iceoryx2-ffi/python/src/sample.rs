@@ -15,7 +15,8 @@ use iceoryx2_log::fatal_panic;
 use pyo3::prelude::*;
 
 use crate::{
-    header_publish_subscribe::HeaderPublishSubscribe, parc::Parc, type_storage::TypeStorage,
+    error::ForwardError, header_publish_subscribe::HeaderPublishSubscribe, parc::Parc,
+    service_name::ServiceName, type_storage::TypeStorage,
 };
 
 pub(crate) enum SampleType {
@@ -111,5 +112,55 @@ impl Sample {
                 v.take();
             }
         }
+    }
+
+    /// Requests that this `Sample` be forwarded onto the
+    /// publish-subscribe service identified by `target`, without
+    /// releasing the subscriber's borrow.
+    ///
+    /// `target` must be declared in the source service's `forwards_into`
+    /// list. R9 (at-most-once per Sample per target) is enforced
+    /// subscriber-side; a second `forward_to` to the same target on
+    /// this Sample raises `ForwardError`.
+    pub fn forward_to(&self, target: PyRef<ServiceName>) -> PyResult<()> {
+        let result = match &*self.value.lock() {
+            SampleType::Ipc(Some(v)) => v.forward_to(&target.0),
+            SampleType::Local(Some(v)) => v.forward_to(&target.0),
+            _ => {
+                return Err(ForwardError::new_err(
+                    "Cannot forward: Sample has already been released.",
+                ));
+            }
+        };
+        result.map_err(|e| ForwardError::new_err(format!("{e:?}")))
+    }
+
+    /// Consumes this `Sample`, releasing the subscriber's borrow AND
+    /// requesting the bucket be forwarded onto the named target service
+    /// in a single fused operation.
+    ///
+    /// On success the Sample is consumed; subsequent access raises
+    /// `ForwardError("released")`. On failure the natural drop runs and
+    /// the borrow is released as a plain `Drop`.
+    pub fn drop_and_forward_to(&mut self, target: PyRef<ServiceName>) -> PyResult<()> {
+        let result = match &mut *self.value.lock() {
+            SampleType::Ipc(slot) => {
+                let sample = slot.take().ok_or_else(|| {
+                    ForwardError::new_err(
+                        "Cannot drop_and_forward: Sample has already been released.",
+                    )
+                })?;
+                sample.drop_and_forward_to(&target.0)
+            }
+            SampleType::Local(slot) => {
+                let sample = slot.take().ok_or_else(|| {
+                    ForwardError::new_err(
+                        "Cannot drop_and_forward: Sample has already been released.",
+                    )
+                })?;
+                sample.drop_and_forward_to(&target.0)
+            }
+        };
+        result.map_err(|e| ForwardError::new_err(format!("{e:?}")))
     }
 }

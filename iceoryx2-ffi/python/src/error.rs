@@ -306,3 +306,10 @@ create_exception!(
     PyException,
     "Errors caused when an EntryHandleMut is created with Writer::entry()."
 );
+
+create_exception!(
+    iceoryx2_ffi_python,
+    ForwardError,
+    PyException,
+    "Errors caused when forwarding a Sample via Sample.forward_to / Sample.drop_and_forward_to."
+);
