@@ -31,6 +31,7 @@ const CYCLE_TIME: Duration = Duration::from_millis(100);
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, ZeroCopySend)]
+#[type_name("LidarScan")]
 struct LidarScan {
     timestamp_ns: u64,
     angle: f32,

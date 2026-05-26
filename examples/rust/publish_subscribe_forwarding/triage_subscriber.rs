@@ -30,6 +30,7 @@ const OBSTACLE_RANGE_THRESHOLD: f32 = 2.0;
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, ZeroCopySend)]
+#[type_name("LidarScan")]
 struct LidarScan {
     timestamp_ns: u64,
     angle: f32,

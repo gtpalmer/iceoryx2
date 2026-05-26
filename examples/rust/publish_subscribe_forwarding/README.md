@@ -12,9 +12,14 @@ design.
 
 ## Run
 
-Three terminals.
+**Start order matters.** A publisher on the source service attaches
+as a forwarder participant on each target service named in
+`forwards_into` at publisher-creation time; if the target service
+does not yet exist, publisher creation fails with
+`ForwardingTargetServiceUnavailable`. Run in this order — three
+terminals:
 
-### Terminal 1 — target subscriber
+### Terminal 1 — target subscriber (creates the target service first)
 
 ```sh
 cargo run --example publish_subscribe_forwarding_target_subscriber
@@ -26,7 +31,7 @@ cargo run --example publish_subscribe_forwarding_target_subscriber
 cargo run --example publish_subscribe_forwarding_triage_subscriber
 ```
 
-### Terminal 3 — source publisher
+### Terminal 3 — source publisher (last; needs the target service alive)
 
 ```sh
 cargo run --example publish_subscribe_forwarding_source_publisher

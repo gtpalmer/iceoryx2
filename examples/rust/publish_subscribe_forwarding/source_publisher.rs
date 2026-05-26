@@ -30,6 +30,11 @@ const CYCLE_TIME: Duration = Duration::from_secs(1);
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, ZeroCopySend)]
+// Explicit type name so all three forwarding-example binaries agree on
+// `LidarScan` (otherwise `core::any::type_name` prefixes the crate
+// path, which differs per binary, and service-compatibility checks
+// fail with `IncompatibleTypes`).
+#[type_name("LidarScan")]
 struct LidarScan {
     timestamp_ns: u64,
     angle: f32,
